@@ -295,72 +295,78 @@ class DetectionOverlay:
 
 class HealthBar:
     """
-    Displays the user's health in the bottom right corner.
+    HP bar with frosted glass, borderless, with 'HP' text and percentage on the left.
     """
     def __init__(self, shared_state, state_lock):
         self.shared_state = shared_state
         self.state_lock = state_lock
-        self.font = pygame.font.Font(None, 24)
         self.width = 200
         self.height = 20
         self.padding = 10
-        self.border_color = (255, 255, 255)
-        self.fill_color = (0, 255, 0)  # Green for health
-        self.bg_color = (50, 50, 50)
+        self.font = pygame.font.Font(None, 20)
+
+        # Frosted glass colors
+        self.bg_color = (255, 255, 255, 25)   # semi-transparent panel
+        self.fill_color = (140, 255, 180)     # green fill
+        self.text_color = (255, 255, 255)     # text color
 
     def draw(self, screen):
         with self.state_lock:
-            current_health = float(self.shared_state.get("health", 0))
+            hp = float(self.shared_state.get("health", 0))
 
-        # Lock to bottom-right
+        # Bottom-right position
         x = SCREEN_WIDTH - self.width - self.padding
         y = SCREEN_HEIGHT - self.height - self.padding
 
-        # Draw health bar
-        pygame.draw.rect(screen, self.bg_color, (x, y, self.width, self.height))
-        fill_width = (max(0.0, min(current_health, 100.0)) / 100.0) * self.width
-        pygame.draw.rect(screen, self.fill_color, (x, y, fill_width, self.height))
-        pygame.draw.rect(screen, self.border_color, (x, y, self.width, self.height), 2)
+        # Frosted background panel
+        panel = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        panel.fill(self.bg_color)
+        screen.blit(panel, (x, y))
 
-        # Draw health text
-        health_text = self.font.render(f"Health: {int(current_health)}%", True, (255, 255, 255))
-        text_rect = health_text.get_rect(center=(x + self.width / 2, y + self.height / 2))
-        screen.blit(health_text, text_rect)
+        # Health fill
+        fill_width = max(0.0, min(hp, 100.0)) / 100.0 * self.width
+        pygame.draw.rect(screen, self.fill_color, (x, y, fill_width, self.height))
+
+        # Text: "HP 75%" style
+        hp_text = self.font.render(f"HP {int(hp)}%", True, self.text_color)
+        screen.blit(hp_text, (x + 5, y + self.height / 2 - hp_text.get_height() / 2))
 
 
 class ExperienceBar:
     """
-    Displays the user's experience points stacked **above** the health bar.
+    XP bar stacked above health bar, frosted glass, borderless, with 'XP' text and percentage.
     """
-    def __init__(self, shared_state, state_lock):
+    def __init__(self, shared_state, state_lock, health_bar_height=20, offset_y=6):
         self.shared_state = shared_state
         self.state_lock = state_lock
-        self.font = pygame.font.Font(None, 24)
         self.width = 200
         self.height = 15
+        self.offset_y = offset_y
         self.padding = 10
-        self.offset_y = 6  # spacing above health bar
-        self.border_color = (255, 255, 255)
-        self.fill_color = (0, 150, 255)
-        self.bg_color = (50, 50, 50)
-        self.health_bar_height = 20  # should match HealthBar height
+        self.font = pygame.font.Font(None, 18)
+        self.health_bar_height = health_bar_height
+
+        # Frosted glass colors
+        self.bg_color = (255, 255, 255, 25)   # semi-transparent panel
+        self.fill_color = (80, 200, 255)      # blue fill
+        self.text_color = (255, 255, 255)     # text color
 
     def draw(self, screen):
         with self.state_lock:
-            current_experience = float(self.shared_state.get("experience", 0))
+            xp = float(self.shared_state.get("experience", 0))
 
         x = SCREEN_WIDTH - self.width - self.padding
-        # Stack **above the health bar** in bottom-right
         y = SCREEN_HEIGHT - self.health_bar_height - self.offset_y - self.height - self.padding
 
-        # Draw XP bar
-        pygame.draw.rect(screen, self.bg_color, (x, y, self.width, self.height))
-        fill_width = (max(0.0, min(current_experience, 100.0)) / 100.0) * self.width
+        # Frosted background panel
+        panel = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        panel.fill(self.bg_color)
+        screen.blit(panel, (x, y))
+
+        # XP fill
+        fill_width = max(0.0, min(xp, 100.0)) / 100.0 * self.width
         pygame.draw.rect(screen, self.fill_color, (x, y, fill_width, self.height))
-        pygame.draw.rect(screen, self.border_color, (x, y, self.width, self.height), 1)
 
-        # Draw XP text
-        xp_text = self.font.render(f"XP: {int(current_experience)}", True, (255, 255, 255))
-        text_rect = xp_text.get_rect(center=(x + self.width / 2, y + self.height / 2))
-        screen.blit(xp_text, text_rect)
-
+        # Text: "XP 42%" style
+        xp_text = self.font.render(f"XP {int(xp)}%", True, self.text_color)
+        screen.blit(xp_text, (x + 5, y + self.height / 2 - xp_text.get_height() / 2))
