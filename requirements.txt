@@ -1,0 +1,24 @@
+# Core Dependencies for Project Aletheia
+# Install using: pip install -r requirements.txt
+
+# For HUD and graphics
+pygame
+
+# For camera access on Raspberry Pi
+picamera2
+
+# For hand gesture recognition
+mediapipe
+
+# OpenCV is a common dependency for computer vision tasks and mediapipe
+opencv-python
+
+# For numerical operations, often used with vision libraries
+numpy
+
+# PyTorch and ExecuTorch for running the YOLOv11 model.
+# NOTE: You will likely need to build these from source for the Raspberry Pi 5
+# to ensure hardware acceleration. Refer to the official PyTorch and ExecuTorch
+# documentation for ARM64/aarch64 build instructions.
+torch
+executorch
