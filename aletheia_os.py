@@ -1,5 +1,5 @@
 # aletheia_os.py
-# Core foundation for Project Aletheia - A Standalone AR OS
+# Core foundation for Project Aletheia - A Standalone AR OS for Raspberry Pi
 # SFHacks 2026
 
 import pygame
@@ -8,9 +8,11 @@ import time
 import math
 import os
 import sys
-from aletheia_gui import EcoSprite, GreyFog, DetectionOverlay, HealthBar, ExperienceBar
+from aletheia_gui import SpiritCompanion, GreyFog, DetectionOverlay, HealthBar, ExperienceBar
 
-# from picamera2 import Picamera2 # Uncomment when on Raspberry Pi
+# RPi-specific camera controller
+from camera_rpi import RPiCamera
+
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -22,7 +24,7 @@ from yolo_live import DetectionThread, get_cpu_temp
 # --- Global Configuration ---
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
 BLACK = (0, 0, 0)
-VERSION = "Aletheia OS v0.2.0"
+VERSION = "Aletheia OS v0.3.0 RPi"
 
 # Path to YOLO model
 YOLO_MODEL_PATH = os.path.join(
@@ -32,187 +34,144 @@ YOLO_MODEL_PATH = os.path.join(
 
 # --- Shared State & Thread Safety ---
 shared_state = {
-    "carbon_velocity": 0.0,       # Range 0.0 to 1.0; affects fog and sprite
-    "index_finger_tip": (0, 0),   # In HUD coordinates
+    "carbon_velocity": 0.0,
+    "index_finger_tip": (0, 0),
     "is_pinching": False,
-    "detected_objects": [],       # List of {"label": str, "box": (x1,y1,x2,y2), ...}
+    "detected_objects": [],
     "app_quit": False,
-    "cpu_temp": 0.0,              # RPi CPU temperature
-    "inference_ms": 0.0,          # Last YOLO inference time
-    "detection_count": 0,         # Number of objects detected
-    "health": 100,                # Current health value (0-100)
-    "experience": 0,              # Current experience points
+    "cpu_temp": 0.0,
+    "inference_ms": 0.0,
+    "detection_count": 0,
+    "health": 100,
+    "experience": 0,
 }
 state_lock = threading.Lock()
 
 
-# --- AR HUD Components ---
+# --- Background Hand Tracking Thread ---
 
-
-
-
-
-
-
-
-
-
-# --- Background Threads ---
-
-def hand_tracking_thread():
+class HandTrackingThread(threading.Thread):
     """
-    Handles camera input and hand tracking (MediaPipe).
-    Runs on the same camera as YOLO but processes every frame for smooth tracking.
+    Handles hand tracking using MediaPipe on frames from the shared camera.
     """
-    print("[HandTracking] Thread started.")
+    def __init__(self, camera, shared_state, state_lock):
+        super().__init__(daemon=True)
+        self.camera = camera
+        self.shared_state = shared_state
+        self.state_lock = state_lock
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.5
+        )
 
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(
-        max_num_hands=1,
-        min_detection_confidence=0.7,
-        min_tracking_confidence=0.5
-    )
+    def run(self):
+        print("[HandTracking] Thread started, waiting for camera...")
+        while True:
+            with self.state_lock:
+                if self.shared_state["app_quit"]:
+                    break
+            
+            frame_rgb = self.camera.get_frame()
+            if frame_rgb is None:
+                time.sleep(0.01) # Wait for frames
+                continue
+            
+            # Flip for mirror view and process
+            frame_rgb = cv2.flip(frame_rgb, 1)
+            results = self.hands.process(frame_rgb)
+            
+            is_pinching_now = False
+            finger_tip_pos = (0, 0)
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("[HandTracking] ERROR: Could not open camera.")
-        return
+            if results.multi_hand_landmarks:
+                hand_landmarks = results.multi_hand_landmarks[0]
+                thumb_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.THUMB_TIP]
+                index_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_TIP]
+                
+                distance = math.hypot(index_tip.x - thumb_tip.x, index_tip.y - thumb_tip.y)
+                if distance < 0.05:
+                    is_pinching_now = True
 
-    while True:
-        with state_lock:
-            if shared_state["app_quit"]:
-                break
+                hud_x = int(index_tip.x * SCREEN_WIDTH)
+                hud_y = int(index_tip.y * SCREEN_HEIGHT)
+                finger_tip_pos = (hud_x, hud_y)
 
-        ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.1)
-            continue
-
-        frame = cv2.flip(frame, 1)
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        results = hands.process(image_rgb)
-        is_pinching_now = False
-        finger_tip_pos = (0, 0)
-
-        if results.multi_hand_landmarks:
-            hand_landmarks = results.multi_hand_landmarks[0]
-
-            thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
-            index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-
-            distance = math.hypot(index_tip.x - thumb_tip.x, index_tip.y - thumb_tip.y)
-
-            if distance < 0.05:
-                is_pinching_now = True
-
-            hud_x = int(index_tip.x * SCREEN_WIDTH)
-            hud_y = int(index_tip.y * SCREEN_HEIGHT)
-            finger_tip_pos = (hud_x, hud_y)
-
-        with state_lock:
-            shared_state["index_finger_tip"] = finger_tip_pos
-            shared_state["is_pinching"] = is_pinching_now
-
-    cap.release()
-    hands.close()
-    print("[HandTracking] Thread finished.")
+            with self.state_lock:
+                self.shared_state["index_finger_tip"] = finger_tip_pos
+                self.shared_state["is_pinching"] = is_pinching_now
+        
+        self.hands.close()
+        print("[HandTracking] Thread finished.")
 
 
 # --- Main Application Logic ---
 
 def main():
-    """
-    Main function to initialize Pygame and run the AR HUD loop.
-    """
     pygame.init()
-
-    # Setup the display - borderless fullscreen
+    SpiritCompanion.time = time # Patch time module for SpiritCompanion
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.NOFRAME)
     pygame.display.set_caption("Aletheia OS")
     pygame.mouse.set_visible(False)
 
-    # --- AR Components ---
+    # --- GUI Components ---
     font = pygame.font.Font(None, 36)
     small_font = pygame.font.Font(None, 28)
     clock = pygame.time.Clock()
-    spirit_companion = SpiritCompanion(shared_state, state_lock) # Changed from eco_sprite
-    all_sprites = pygame.sprite.Group(spirit_companion) # Changed from eco_sprite
+    spirit_companion = SpiritCompanion(shared_state, state_lock)
+    all_sprites = pygame.sprite.Group(spirit_companion)
     grey_fog = GreyFog(shared_state, state_lock)
     detection_overlay = DetectionOverlay(shared_state, state_lock)
     health_bar = HealthBar(shared_state, state_lock)
     experience_bar = ExperienceBar(shared_state, state_lock)
 
-    # --- Cursor for hand tracking ---
-    cursor_img = pygame.Surface((20, 20), pygame.SRCALPHA)
-    pygame.draw.circle(cursor_img, (255, 255, 255, 200), (10, 10), 10)
+    # --- Start RPi Camera Controller ---
+    print("[Main] Initializing RPi Camera...")
+    rpi_camera = RPiCamera()
+    rpi_camera.start()
 
-    # --- Start YOLO Detection Thread ---
-    print(f"[Main] Starting YOLO detection thread...")
-    print(f"[Main] Model: {YOLO_MODEL_PATH}")
-
+    # --- Start Worker Threads ---
+    # Start YOLO Detection Thread, passing the camera object
     detection_thread = DetectionThread(
         model_path=YOLO_MODEL_PATH,
+        camera=rpi_camera,
         shared_state=shared_state,
-        state_lock=state_lock,
-        camera_index=0,
-        base_interval=2.5,     # Run detection every 2.5 seconds
-        confidence=0.25,
+        state_lock=state_lock
     )
     detection_thread.start()
 
-    # --- Start Hand Tracking Thread ---
-    # NOTE: If using the same camera for both YOLO and hand tracking,
-    # you may need to use a single camera thread and share frames.
-    # For now, YOLO uses its own camera capture in DetectionThread.
-    # Uncomment below if you have a second camera or want hand tracking:
-    #
-    # hand_thread = threading.Thread(target=hand_tracking_thread, daemon=True)
-    # hand_thread.start()
+    # Start Hand Tracking Thread, passing the same camera object
+    hand_thread = HandTrackingThread(
+        camera=rpi_camera,
+        shared_state=shared_state,
+        state_lock=state_lock
+    )
+    hand_thread.start()
 
     # --- Main Loop ---
     running = True
     while running:
-        # Event handling
         for event in pygame.event.get():
-            if event.type == pygame.QUIT:
+            if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
                 running = False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
 
-        # --- Update Step ---
         all_sprites.update()
-
-        # --- Draw Step ---
         screen.fill(BLACK)
 
-        # Draw Grey Fog overlay (carbon impact atmosphere)
+        # Draw all GUI elements
         grey_fog.draw(screen)
-
-        # Draw AR sprites
         all_sprites.draw(screen)
-
-        # Draw detection overlay (object list)
         detection_overlay.draw(screen)
-
-        # Draw Health and Experience Bars
         health_bar.draw(screen)
         experience_bar.draw(screen)
 
-        # Get latest state
+        # Draw hand cursor
         with state_lock:
             cursor_pos = shared_state["index_finger_tip"]
             is_pinching = shared_state["is_pinching"]
-            carbon_v = shared_state["carbon_velocity"]
-            cpu_temp = shared_state.get("cpu_temp", 0)
-            inference_ms = shared_state.get("inference_ms", 0)
-            det_count = shared_state.get("detection_count", 0)
-
-
-
-        # Draw the hand cursor
-        cursor_img.fill((0, 0, 0, 0))
+        
+        cursor_img = pygame.Surface((20, 20), pygame.SRCALPHA)
         if is_pinching:
             pygame.draw.circle(cursor_img, (50, 255, 50, 220), (10, 10), 10, width=4)
         else:
@@ -220,42 +179,41 @@ def main():
         screen.blit(cursor_img, cursor_pos)
 
         # --- Debug / Status Bar ---
-        temp_str = f"{cpu_temp:.0f}°C" if cpu_temp > 0 else "N/A"
-        temp_color = (255, 255, 255)
-        if cpu_temp >= 80:
-            temp_color = (255, 50, 50)
-        elif cpu_temp >= 70:
-            temp_color = (255, 180, 0)
+        with state_lock:
+            carbon_v = shared_state["carbon_velocity"]
+            det_count = shared_state["detection_count"]
+            cpu_temp = shared_state["cpu_temp"]
+            inference_ms = shared_state["inference_ms"]
 
-        # Top status line
-        debug_text = (f"{VERSION} | HUD FPS: {clock.get_fps():.0f} | "
-                      f"Carbon: {carbon_v:.2f} | Objects: {det_count}")
+        temp_str = f"{cpu_temp:.0f}°C" if cpu_temp > 0 else "N/A"
+        temp_color = (255, 180, 0) if cpu_temp >= 70 else (255, 50, 50) if cpu_temp >= 80 else (255, 255, 255)
+        
+        debug_text = f"{VERSION} | HUD FPS: {clock.get_fps():.0f} | Carbon: {carbon_v:.2f} | Objects: {det_count}"
         text_surface = font.render(debug_text, True, (255, 255, 255))
         screen.blit(text_surface, (20, 20))
 
-        # Bottom status line (thermal + inference)
         bottom_text = f"CPU: {temp_str} | YOLO: {inference_ms:.0f}ms"
         bottom_surface = small_font.render(bottom_text, True, temp_color)
         screen.blit(bottom_surface, (20, SCREEN_HEIGHT - 40))
 
-        # Thermal warning
         if cpu_temp >= 80:
             warn_surface = font.render("⚠ THERMAL THROTTLE", True, (255, 50, 50))
             screen.blit(warn_surface, (SCREEN_WIDTH // 2 - 120, SCREEN_HEIGHT - 40))
 
-        # --- Final Flip ---
         pygame.display.flip()
         clock.tick(60)
 
-    # Signal threads to quit
+    # --- Shutdown ---
+    print("[Main] Shutdown signal received. Stopping threads...")
     with state_lock:
         shared_state["app_quit"] = True
 
-    print("[Main] Waiting for threads to finish...")
-    detection_thread.join(timeout=5)
+    rpi_camera.stop()
+    detection_thread.join(timeout=2)
+    hand_thread.join(timeout=2)
+    
     pygame.quit()
     print("[Main] Aletheia OS has shut down cleanly.")
-
 
 if __name__ == "__main__":
     main()

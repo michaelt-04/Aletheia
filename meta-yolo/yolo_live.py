@@ -100,25 +100,25 @@ def get_throttle_delay(temp, base_interval):
 
 class DetectionThread(threading.Thread):
     """
-    Background thread that captures camera frames, runs YOLO detection,
+    Background thread that receives camera frames, runs YOLO detection,
     and updates a shared state dictionary.
 
     Args:
         model_path: Path to .pte model file
+        camera: An initialized camera object (e.g., RPiCamera) with a get_frame() method.
         shared_state: Dict with keys "detected_objects", "carbon_velocity", "app_quit"
         state_lock: threading.Lock for safe access to shared_state
-        camera_index: Camera device index (default 0)
         base_interval: Seconds between detections (default 2.5)
         confidence: Detection confidence threshold (default 0.25)
     """
 
-    def __init__(self, model_path, shared_state, state_lock,
-                 camera_index=0, base_interval=2.5, confidence=0.25):
+    def __init__(self, model_path, camera, shared_state, state_lock,
+                 base_interval=2.5, confidence=0.25):
         super().__init__(daemon=True)
         self.model_path = model_path
+        self.camera = camera
         self.shared_state = shared_state
         self.state_lock = state_lock
-        self.camera_index = camera_index
         self.base_interval = base_interval
         self.confidence = confidence
         self._detector = None
@@ -139,34 +139,17 @@ class DetectionThread(threading.Thread):
             print(f"[DetectionThread] ERROR loading model: {e}")
             return
 
-        # Open camera using Picamera2 (Pi Camera) or OpenCV (USB webcam)
-        picam = None
-        cap = None
-
-        if HAS_PICAMERA2:
-            try:
-                picam = Picamera2()
-                config = picam.create_still_configuration(
-                    main={"size": (640, 480), "format": "RGB888"}
-                )
-                picam.configure(config)
-                picam.start()
-                time.sleep(1.0)  # Let camera warm up
-                print(f"[DetectionThread] Picamera2 opened successfully.")
-            except Exception as e:
-                print(f"[DetectionThread] Picamera2 failed: {e}, falling back to OpenCV")
-                picam = None
-
-        if picam is None:
-            cap = cv2.VideoCapture(self.camera_index)
-            if not cap.isOpened():
-                print(f"[DetectionThread] ERROR: Could not open camera {self.camera_index}")
-                return
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            print(f"[DetectionThread] OpenCV camera opened.")
-
-        print(f"[DetectionThread] Running detection loop...")
+        print(f"[DetectionThread] Waiting for camera frames...")
+        # Wait until the camera provides the first frame
+        while True:
+            if self.camera.get_frame() is not None:
+                print(f"[DetectionThread] First frame received. Starting detection loop.")
+                break
+            with self.state_lock:
+                if self.shared_state.get("app_quit", False):
+                    print("[DetectionThread] Aborting before first frame.")
+                    return
+            time.sleep(0.5)
 
         frame_count = 0
         while True:
@@ -175,28 +158,19 @@ class DetectionThread(threading.Thread):
                 if self.shared_state.get("app_quit", False):
                     break
 
-            # Capture frame
-            frame = None
-            if picam is not None:
-                try:
-                    rgb_frame = picam.capture_array()
-                    # Picamera2 with RGB888 gives RGB, but YOLO engine expects BGR
-                    frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
-                except Exception as e:
-                    print(f"[DetectionThread] Capture error: {e}")
-            else:
-                ret, frame = cap.read()
-                if not ret:
-                    frame = None
-
-            if frame is None:
-                print("[DetectionThread] WARNING: Failed to capture frame, retrying...")
+            # Capture frame from the shared camera object
+            # The RPiCamera provides RGB, but the YOLO engine expects BGR
+            frame_rgb = self.camera.get_frame()
+            if frame_rgb is None:
+                print("[DetectionThread] WARNING: Failed to get frame from camera, retrying...")
                 time.sleep(0.5)
                 continue
+            
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
             # Run detection
             t0 = time.time()
-            detections = self._detector.detect(frame)
+            detections = self._detector.detect(frame_bgr)
             inference_time = time.time() - t0
 
             # Compute carbon velocity
@@ -233,7 +207,6 @@ class DetectionThread(threading.Thread):
 
             # Sleep until next detection
             sleep_time = max(0, interval - inference_time)
-            # Sleep in small chunks so we can respond to quit signal quickly
             sleep_end = time.time() + sleep_time
             while time.time() < sleep_end:
                 with self.state_lock:
@@ -241,11 +214,7 @@ class DetectionThread(threading.Thread):
                         break
                 time.sleep(0.1)
 
-        # Cleanup
-        if picam is not None:
-            picam.stop()
-        if cap is not None:
-            cap.release()
+        # Cleanup is handled by the main thread that owns the camera object
         print("[DetectionThread] Stopped.")
 
 
