@@ -136,8 +136,8 @@ def main():
     font = pygame.font.Font(None, 36)
     small_font = pygame.font.Font(None, 28)
     clock = pygame.time.Clock()
-    eco_sprite = EcoSprite(shared_state, state_lock)
-    all_sprites = pygame.sprite.Group(eco_sprite)
+    spirit_companion = SpiritCompanion(shared_state, state_lock) # Changed from eco_sprite
+    all_sprites = pygame.sprite.Group(spirit_companion) # Changed from eco_sprite
     grey_fog = GreyFog(shared_state, state_lock)
     detection_overlay = DetectionOverlay(shared_state, state_lock)
     health_bar = HealthBar(shared_state, state_lock)
@@ -209,14 +209,7 @@ def main():
             inference_ms = shared_state.get("inference_ms", 0)
             det_count = shared_state.get("detection_count", 0)
 
-            # Placeholder for health/experience update (for demonstration)
-            if is_pinching:
-                # Decrease health and increase experience
-                shared_state["health"] = max(0, shared_state["health"] - 0.1)
-                shared_state["experience"] = min(100, shared_state["experience"] + 0.2)
-            else:
-                # Slowly regenerate health, no experience change
-                shared_state["health"] = min(100, shared_state["health"] + 0.05)
+
 
         # Draw the hand cursor
         cursor_img.fill((0, 0, 0, 0))

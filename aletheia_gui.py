@@ -11,59 +11,138 @@ BLACK = (0, 0, 0)
 # Shared state and lock are passed to GUI elements for drawing logic
 # but not defined here to avoid circular imports.
 
-class EcoSprite(pygame.sprite.Sprite):
-    """
-    A floating entity whose appearance and behavior are tied to environmental data.
-    """
+class SpiritCompanion(pygame.sprite.Sprite):
     def __init__(self, shared_state, state_lock):
         super().__init__()
-        self.image = pygame.Surface((50, 50), pygame.SRCALPHA)
-        pygame.draw.circle(self.image, (0, 255, 150), (25, 25), 25)
-        self.rect = self.image.get_rect(center=(SCREEN_WIDTH - 150, 150))
+        self.image = pygame.Surface((600, 600), pygame.SRCALPHA)
+        # Initial position, which will be updated by its movement logic
+        self.rect = self.image.get_rect(center=(300, SCREEN_HEIGHT // 2))
         
         self.shared_state = shared_state
         self.state_lock = state_lock
 
-        # Bobbing animation state
-        self.bob_angle = 0
-        self.bob_speed = 0.02
-        self.bob_amplitude = 10
-        self.base_y = self.rect.y
+        self.home_pos = pygame.Vector2(300, SCREEN_HEIGHT // 2)
+        self.pos = pygame.Vector2(300, SCREEN_HEIGHT // 2)
+        
+        self.hover_angle = 0
+        self.wing_angle = 0
+        self.particles = []
+        
+        # Happy Arc Logic
+        self.is_jumping = False
+        self.jump_progress = 0
+        self.jump_timer = time.time() # This needs to be imported, will add later
+        
+        # Angry Star Logic
+        self.star_angle = 0
 
-        # State management
-        self.state = "calm"  # "calm", "agitated", "critical"
+    def draw_ethereal_wing(self, surf, center, angle_offset, width, height, color, is_left=True):
+        """Draws soft light-based wings."""
+        for i in range(5, 0, -1):
+            w, h = width + (i * 12), height + (i * 6)
+            wing_surf = pygame.Surface((w * 2, h * 2), pygame.SRCALPHA)
+            alpha = 50 // i
+            pygame.draw.ellipse(wing_surf, color + (alpha,), (0, 0, w, h))
+            rot_angle = angle_offset + (math.sin(self.wing_angle) * 15)
+            if not is_left: rot_angle = -rot_angle
+            rotated = pygame.transform.rotate(wing_surf, rot_angle)
+            surf.blit(rotated, rotated.get_rect(center=center), special_flags=pygame.BLEND_ADD)
 
     def update(self):
-        # 1. Bobbing Animation
-        self.bob_angle += self.bob_speed
-        if self.bob_angle > 2 * math.pi:
-            self.bob_angle -= 2 * math.pi
-        self.rect.y = self.base_y + int(self.bob_amplitude * math.sin(self.bob_angle))
-
-        # 2. State change based on Carbon Velocity
+        self.image.fill((0, 0, 0, 0))
+        now = pygame.time.get_ticks() / 1000.0 # Use pygame.time for consistency
+        
         with self.state_lock:
             carbon_v = self.shared_state["carbon_velocity"]
 
-        new_state = "calm"
-        if 0.3 <= carbon_v < 0.7:
-            new_state = "agitated"
-        elif carbon_v >= 0.7:
-            new_state = "critical"
+        # State Mapping
+        if carbon_v <= 0.26:
+            state, color, wing_speed = "pristine", (180, 255, 200), 0.08
+        elif carbon_v <= 0.6:
+            state, color, wing_speed = "calm", (80, 255, 150), 0.18
+        else:
+            state, color, wing_speed = "angry", (255, 40, 40), 1.2
 
-        if new_state != self.state:
-            self.state = new_state
-            self.update_appearance()
+        self.wing_angle += wing_speed
+        self.hover_angle += 0.08
 
-    def update_appearance(self):
-        """Update sprite visuals based on its current state."""
-        self.image.fill((0, 0, 0, 0))  # Clear
-        if self.state == "calm":
-            pygame.draw.circle(self.image, (0, 255, 150), (25, 25), 25)
-        elif self.state == "agitated":
-            pygame.draw.circle(self.image, (255, 180, 0), (25, 25), 25)
-        elif self.state == "critical":
-            pygame.draw.circle(self.image, (255, 50, 50), (25, 25), 25)
-            pygame.draw.circle(self.image, (255, 255, 255), (25, 25), 25, width=3)
+        # --- MOVEMENT BEHAVIORS ---
+        if state == "angry":
+            # VIOLENT STAR ANIMATION
+            self.star_angle += 1.5 
+            r = 50 # Radius of the star points
+            points = [0, 144, 288, 72, 216]
+            idx = int(self.star_angle % 5)
+            target_angle = math.radians(points[idx])
+            
+            star_offset = pygame.Vector2(math.cos(target_angle) * r, math.sin(target_angle) * r)
+            jitter = pygame.Vector2(random.randint(-15, 15), random.randint(-15, 15))
+            self.pos = self.home_pos + star_offset + jitter
+            self.is_jumping = False
+            
+        elif state == "pristine":
+            # SPEEDY 180-DEGREE ARC JUMP
+            if not self.is_jumping and now - self.jump_timer > random.uniform(3, 5):
+                self.is_jumping = True
+                self.jump_progress = 0
+                self.jump_timer = now # Reset timer when jump starts
+            
+            if self.is_jumping:
+                self.jump_progress += 0.035 
+                
+                angle = self.jump_progress * math.pi 
+                radius = 250
+                
+                offset_x = math.sin(angle) * radius
+                offset_y = (1 - math.cos(angle)) * radius
+                
+                self.pos = self.home_pos + pygame.Vector2(offset_x, -offset_y)
+
+                if self.jump_progress >= 1.0:
+                    self.is_jumping = False
+                    self.jump_timer = now
+            else:
+                # Freedom Drift (High magnitude)
+                drift = pygame.Vector2(math.sin(now * 1.5) * 60, math.cos(now * 1.2) * 45)
+                self.pos += (self.home_pos + drift - self.pos) * 0.08
+        
+        else: # Calm state
+            drift = pygame.Vector2(math.sin(now * 1.2) * 40, math.cos(now * 0.8) * 30)
+            self.pos += (self.home_pos + drift - self.pos) * 0.1
+            self.is_jumping = False
+
+        self.rect.center = (int(self.pos.x), int(self.pos.y))
+
+        # --- Render Spirit ---
+        center = (300, 300)
+        self.draw_ethereal_wing(self.image, (240, 270), 30, 120, 35, color, True)
+        self.draw_ethereal_wing(self.image, (360, 270), 30, 120, 35, color, False)
+        self.draw_ethereal_wing(self.image, (250, 310), -20, 90, 25, color, True)
+        self.draw_ethereal_wing(self.image, (350, 310), -20, 90, 25, color, False)
+        
+        for i in range(6, 0, -1):
+            pygame.draw.circle(self.image, color + (170 // i,), center, 10 + (i * 9))
+        pygame.draw.circle(self.image, (255, 255, 255), center, 14) # WHITE
+
+        # Sparkles
+        if random.random() > 0.4:
+            self.particles.append(Particle(self.rect.centerx, self.rect.centery, color))
+
+class Particle: # Moved Particle class definition here, it is used by SpiritCompanion
+    def __init__(self, x, y, color):
+        self.x, self.y = x, y
+        self.color = color
+        self.size = random.randint(2, 5)
+        self.life = 1.0
+        self.decay = random.uniform(0.02, 0.05)
+        self.vel_x = random.uniform(-1.5, 1.5)
+        self.vel_y = random.uniform(-1.5, 1.5)
+
+    def update(self):
+        self.x += self.vel_x
+        self.y += self.vel_y
+        self.life -= self.decay
+
 
 
 class GreyFog:
