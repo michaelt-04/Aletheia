@@ -69,10 +69,16 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.orbit_particles = []
         self._last_orbit_spawn = 0.0
 
-        # Happy Arc Logic
-        self.is_jumping = False
-        self.jump_progress = 0
-        self.jump_timer = time.time()
+        # Movement state tracking
+        self.current_state = "calm"
+        self.previous_state = "calm"
+        self.is_transitioning = False
+        self.transition_progress = 0.0
+        
+        # Pristine celebration variables
+        self.celebration_phase = "idle"  # idle, settling, ascent, circle, descent
+        self.celebration_progress = 0.0
+        self.celebration_timer = 0.0
 
         # Angry Star Logic
         self.star_angle = 0
@@ -92,97 +98,91 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
     def update(self):
         self.image.fill((0, 0, 0, 0))
-        now = pygame.time.get_ticks() / 1000.0  # Use pygame.time for consistency
+        now = pygame.time.get_ticks() / 1000.0
 
+        # Determine state from carbon_velocity
         with self.state_lock:
-            carbon_v = self.shared_state["carbon_velocity"]
+            carbon_v = self.shared_state.get("carbon_velocity", 0.0)
 
-        # State Mapping
         if carbon_v <= 0.26:
-            state, color, wing_speed = "pristine", (180, 255, 200), 0.08
+            state = "pristine"
+            color = (180, 255, 200)  # Light green
+            wing_speed = 0.08
         elif carbon_v <= 0.6:
-            state, color, wing_speed = "calm", (80, 255, 150), 0.18
+            state = "calm"
+            color = (80, 255, 150)   # Calm green
+            wing_speed = 0.18
         else:
-            state, color, wing_speed = "angry", (255, 40, 40), 1.2
+            state = "angry"
+            color = (255, 40, 40)    # Red
+            wing_speed = 1.2
 
-        # --- BREATHING / PALPITATION (green states) ---
+        # Handle state transitions
+        if state != self.current_state:
+            self.previous_state = self.current_state
+            self.current_state = state
+            self.celebration_phase = "idle"
+            self.celebration_progress = 0.0
+
+            if state == "pristine":
+                self.celebration_phase = "circle"
+                self.circle_center = self.home_pos.copy()
+                self.celebration_progress = 0.0
+            elif state == "angry":
+                self.jitter_timer = now  # start jittering
+
+        # --- BREATHING / SCALE ---
         if state in ("pristine", "calm"):
             breath_rate = 1.2 if state == "pristine" else 1.6
             breath_amp = 0.06 if state == "pristine" else 0.045
-            breath = 1.0 + math.sin(now * (math.tau * breath_rate)) * breath_amp
+            breath = 1.0 + math.sin(now * math.tau * breath_rate) * breath_amp
         else:
             breath = 1.0
 
         self.wing_angle += wing_speed
         self.hover_angle += 0.08
 
-        # --- MOVEMENT BEHAVIORS ---
+        # --- POSITION LOGIC ---
         if state == "angry":
-            # VIOLENT STAR ANIMATION
-            self.star_angle += 1
-            r = 0  # Radius of the star points (keep 0 for "snap" vibe)
-            points = [0, 144, 288, 72, 216]
-            idx = int(self.star_angle % 5)
-            target_angle = math.radians(points[idx])
-
-            star_offset = pygame.Vector2(math.cos(target_angle) * r, math.sin(target_angle) * r)
-            jitter = pygame.Vector2(random.randint(-5, 5), random.randint(-5, 5))
-            self.pos = self.home_pos + star_offset + jitter
-            self.is_jumping = False
+            # jitter randomly around home_pos for 0.5s
+            jitter = pygame.Vector2(random.randint(-8, 8), random.randint(-8, 8))
+            self.pos = self.home_pos + jitter
 
         elif state == "pristine":
-            # SPEEDY 180-DEGREE ARC JUMP
-            if not self.is_jumping and now - self.jump_timer > random.uniform(3, 5):
-                self.is_jumping = True
-                self.jump_progress = 0
-                self.jump_timer = now  # Reset timer when jump starts
-
-            if self.is_jumping:
-                self.jump_progress += 0.035
-
-                angle = self.jump_progress * math.pi
-                radius = 250
-
-                offset_x = math.sin(angle) * radius
-                offset_y = (1 - math.cos(angle)) * radius
-
-                self.pos = self.home_pos + pygame.Vector2(offset_x, -offset_y)
-
-                if self.jump_progress >= 1.0:
-                    self.is_jumping = False
-                    self.jump_timer = now
+            if self.celebration_phase == "circle":
+                circle_speed = 0.05
+                circle_radius = 80
+                self.celebration_progress += circle_speed
+                angle = self.celebration_progress * 2 * math.pi
+                self.pos = self.circle_center + pygame.Vector2(math.cos(angle) * circle_radius,
+                                                            math.sin(angle) * circle_radius)
+                if self.celebration_progress >= 1.0:
+                    self.celebration_phase = "idle"
+                    self.pos = self.home_pos.copy()
             else:
-                # Freedom Drift (High magnitude)
-                drift = pygame.Vector2(math.sin(now * 1.5) * 60, math.cos(now * 1.2) * 45)
-                self.pos += (self.home_pos + drift - self.pos) * 0.08
+                self.pos = self.home_pos.copy()
 
-        else:  # Calm state
-            drift = pygame.Vector2(math.sin(now * 1.2) * 40, math.cos(now * 0.8) * 30)
-            self.pos += (self.home_pos + drift - self.pos) * 0.1
-            self.is_jumping = False
+        else:  # calm
+            drift = pygame.Vector2(math.sin(now * 1.2) * 30, math.cos(now * 0.8) * 25)
+            self.pos = self.pos.lerp(self.home_pos + drift, 0.08)
 
         self.rect.center = (int(self.pos.x), int(self.pos.y))
 
-        # --- ORBITING PARTICLES (only in green states) ---
+        # --- ORBIT PARTICLES (only for green states) ---
         if state in ("pristine", "calm"):
-            spawn_interval = 0.09 if state == "pristine" else 0.06
-            if now - self._last_orbit_spawn > spawn_interval and len(self.orbit_particles) < 180:
+            if now - self._last_orbit_spawn > 0.06 and len(self.orbit_particles) < 100:
                 self._last_orbit_spawn = now
-                base_r = random.uniform(40, 120)
                 ang = random.uniform(0, math.tau)
-                ang_speed = random.uniform(0.02, 0.06) * (1 if random.random() > 0.5 else -1)
-                size = random.randint(2, 5)
-                life = random.uniform(0.8, 1.4)
-                self.orbit_particles.append(OrbitParticle(ang, base_r, ang_speed, size, life, color))
+                r = random.uniform(40, 120)
+                speed = random.uniform(0.02, 0.06) * (1 if random.random() > 0.5 else -1)
+                self.orbit_particles.append(OrbitParticle(ang, r, speed, random.randint(2, 5), 1.0, color))
 
         for p in self.orbit_particles:
             p.update()
         self.orbit_particles = [p for p in self.orbit_particles if p.life > 0]
 
-        # --- Render Spirit ---
+        # --- DRAW ---
         center = (300, 300)
-
-        # Draw orbit particles FIRST so the core is on top
         for p in self.orbit_particles:
             ox = center[0] + math.cos(p.angle) * (p.radius * breath)
             oy = center[1] + math.sin(p.angle) * (p.radius * breath)
@@ -195,24 +195,11 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.draw_ethereal_wing(self.image, (250, 310), -20, 90, 25, color, True)
         self.draw_ethereal_wing(self.image, (350, 310), -20, 90, 25, color, False)
 
-        # Core rings (apply breathing scale)
+        # Core
         for i in range(6, 0, -1):
             r = int((10 + (i * 9)) * breath)
             pygame.draw.circle(self.image, color + (170 // i,), center, r)
-        pygame.draw.circle(self.image, (255, 255, 255), center, int(14 * breath))  # WHITE
-
-        # Sparkles (local to the sprite surface)
-        if random.random() > 0.4:
-            self.particles.append(Particle(center[0], center[1], color))
-
-        for sp in self.particles:
-            sp.update()
-        self.particles = [sp for sp in self.particles if sp.life > 0]
-
-        for sp in self.particles:
-            alpha = int(180 * max(0.0, min(1.0, sp.life)))
-            pygame.draw.circle(self.image, sp.color + (alpha,), (int(sp.x), int(sp.y)), sp.size)
-
+        pygame.draw.circle(self.image, (255, 255, 255), center, int(14 * breath))
 
 class GreyFog:
     """
