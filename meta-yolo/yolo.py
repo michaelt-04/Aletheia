@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-yolo.py - YOLO26s ExecuTorch Test Script for Project Aletheia
-==============================================================
+yolo.py - YOLO26 ExecuTorch Test Script for Project Aletheia
+=============================================================
 
-Tests the YOLO26s XNNPACK INT8 model on a static image (no camera needed).
+Tests the YOLO26 XNNPACK model on a static image (no camera needed).
 Outputs detection results to the terminal so you can verify the model works
 before integrating into the full Aletheia OS pipeline.
 
@@ -69,7 +69,7 @@ CARBON_IMPACT = {
 
 
 # --- Model Configuration ---
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yolo26s_xnnpack_q8.pte")
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yolo26n_xnnpack.pte")
 INPUT_SIZE = 640
 CONFIDENCE_THRESHOLD = 0.25
 
@@ -78,17 +78,14 @@ def preprocess(image: np.ndarray):
     """
     Preprocess an image for YOLO26 inference.
 
-    IMPORTANT: This model expects float32 values in 0-255 range (NOT normalized to 0-1).
-
-    Steps:
-        1. Letterbox resize to 640x640 (preserves aspect ratio with padding)
-        2. Convert BGR -> RGB
-        3. Convert to float32 (keep 0-255 range)
-        4. Transpose from HWC to CHW format
-        5. Convert to torch tensor with batch dimension -> [1, 3, 640, 640]
+    Key requirements (from model README):
+        - Input: float32 in [0, 1] range (normalized)
+        - Format: NCHW [1, 3, H, W]
+        - Tensor MUST be .contiguous() or outputs will be wrong
+        - Image should be RGB
 
     Returns:
-        input_tensor: torch.Tensor of shape [1, 3, 640, 640], dtype float32, range 0-255
+        input_tensor: torch.Tensor, contiguous, shape [1, 3, 640, 640], float32, range [0, 1]
         scale_info:   tuple of (scale, (pad_w, pad_h)) for mapping coords back
     """
     h, w = image.shape[:2]
@@ -107,9 +104,12 @@ def preprocess(image: np.ndarray):
     top, left = int(pad_h), int(pad_w)
     canvas[top:top + new_h, left:left + new_w] = resized
 
-    # BGR -> RGB, float32 (0-255, NOT normalized), HWC -> CHW, batch dim
+    # BGR -> RGB, normalize to [0, 1], HWC -> CHW, add batch dim
     rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-    tensor = torch.tensor(rgb.astype(np.float32)).permute(2, 0, 1).unsqueeze(0)
+    img_float = rgb.astype(np.float32) / 255.0  # Normalize to [0, 1]
+
+    # Convert to tensor: permute creates non-contiguous memory, so .contiguous() is CRITICAL
+    tensor = torch.from_numpy(img_float).permute(2, 0, 1).unsqueeze(0).contiguous()
 
     return tensor, (scale, (pad_w, pad_h))
 
@@ -118,17 +118,15 @@ def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESH
     """
     Parse YOLO26 output into detections.
 
-    YOLO26 is NMS-free and outputs shape [1, 300, 6]:
+    YOLO26 NMS-free output shape: [1, 300, 6]
         - 300 candidate detections (max)
-        - 6 values per detection: [x1, y1, x2, y2, confidence, class_id]
-
-    We only need to filter by confidence (no NMS needed).
-    Coordinates are mapped back to the original image space.
+        - 6 values per detection: [cx, cy, w, h, confidence, class_id]
+        - Box format is CENTER x, CENTER y, WIDTH, HEIGHT (not x1,y1,x2,y2)
 
     Returns:
         List of dicts with keys: label, confidence, box, class_id, carbon_impact
     """
-    # Handle different output formats from ExecuTorch
+    # Handle output format
     if isinstance(output, (list, tuple)):
         raw = output[0]
     else:
@@ -139,51 +137,35 @@ def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESH
         raw = raw.numpy()
     raw = np.array(raw, dtype=np.float32)
 
-    # Debug: print raw output shape
+    # Debug info
     print(f"  Raw output shape: {raw.shape}")
-    print(f"  Raw output dtype: {raw.dtype}")
     if raw.size > 0:
         print(f"  Value range: [{raw.min():.4f}, {raw.max():.4f}]")
 
-    # Remove batch dimension if present: [1, N, C] -> [N, C]
+    # Remove batch dimension: [1, 300, 6] -> [300, 6]
     if raw.ndim == 3:
         raw = raw[0]
 
-    detections = []
+    # Parse columns: [cx, cy, w, h, confidence, class_id]
+    cx = raw[:, 0]
+    cy = raw[:, 1]
+    bw = raw[:, 2]
+    bh = raw[:, 3]
+    confidences = raw[:, 4]
+    class_ids = np.round(raw[:, 5]).astype(int)
 
-    if raw.ndim == 2 and raw.shape[-1] == 6:
-        # Standard YOLO26 NMS-free format: [300, 6]
-        # Each row: [x1, y1, x2, y2, confidence, class_id]
-        print(f"  Format: [N, 6] standard YOLO26 NMS-free")
-        boxes = raw[:, :4]
-        confidences = raw[:, 4]
-        class_ids = np.round(raw[:, 5]).astype(int)  # Round float class IDs
-
-    elif raw.ndim == 2 and raw.shape[0] == 6:
-        print(f"  Format: [6, N] transposed -> converting")
-        raw = raw.T
-        boxes = raw[:, :4]
-        confidences = raw[:, 4]
-        class_ids = np.round(raw[:, 5]).astype(int)
-
-    elif raw.ndim == 2 and raw.shape[-1] == 84:
-        print(f"  Format: [N, 84] YOLOv8-style with class scores")
-        boxes = raw[:, :4]
-        class_scores = raw[:, 4:]
-        confidences = np.max(class_scores, axis=1)
-        class_ids = np.argmax(class_scores, axis=1)
-
-    else:
-        print(f"  WARNING: Unexpected output shape {raw.shape}")
-        print(f"  Cannot parse this format. Returning empty detections.")
-        return []
+    # Convert center format to corner format: cx,cy,w,h -> x1,y1,x2,y2
+    x1 = cx - bw / 2
+    y1 = cy - bh / 2
+    x2 = cx + bw / 2
+    y2 = cy + bh / 2
 
     print(f"  Confidence range: [{confidences.min():.6f}, {confidences.max():.6f}]")
     print(f"  Detections above {conf_threshold}: {(confidences >= conf_threshold).sum()}")
 
     # Filter by confidence
     mask = confidences >= conf_threshold
-    boxes = boxes[mask]
+    x1, y1, x2, y2 = x1[mask], y1[mask], x2[mask], y2[mask]
     confidences = confidences[mask]
     class_ids = class_ids[mask]
 
@@ -191,17 +173,16 @@ def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESH
     scale, (pad_w, pad_h) = scale_info
     orig_h, orig_w = orig_shape[:2]
 
-    for box, conf, cls_id in zip(boxes, confidences, class_ids):
-        x1, y1, x2, y2 = box
-
+    detections = []
+    for i in range(len(confidences)):
         # Remove padding offset and rescale to original image
-        x1 = max(0, (x1 - pad_w) / scale)
-        y1 = max(0, (y1 - pad_h) / scale)
-        x2 = min(orig_w, (x2 - pad_w) / scale)
-        y2 = min(orig_h, (y2 - pad_h) / scale)
+        bx1 = max(0, (x1[i] - pad_w) / scale)
+        by1 = max(0, (y1[i] - pad_h) / scale)
+        bx2 = min(orig_w, (x2[i] - pad_w) / scale)
+        by2 = min(orig_h, (y2[i] - pad_h) / scale)
 
         # Get class name (clamp to valid range)
-        cls_id = int(np.clip(cls_id, 0, len(COCO_CLASSES) - 1))
+        cls_id = int(np.clip(class_ids[i], 0, len(COCO_CLASSES) - 1))
         label = COCO_CLASSES[cls_id]
 
         # Get carbon impact category
@@ -209,8 +190,8 @@ def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESH
 
         detections.append({
             "label": label,
-            "confidence": float(conf),
-            "box": (int(x1), int(y1), int(x2), int(y2)),
+            "confidence": float(confidences[i]),
+            "box": (int(bx1), int(by1), int(bx2), int(by2)),
             "class_id": cls_id,
             "carbon_impact": impact,
         })
@@ -236,10 +217,8 @@ def draw_detections(image, detections):
         impact = det["carbon_impact"]
         color = impact_colors.get(impact, (255, 255, 255))
 
-        # Draw box
         cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
 
-        # Draw label background + text
         text = f"{label} {conf:.2f} [{impact}]"
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(image, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
@@ -250,7 +229,7 @@ def draw_detections(image, detections):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test YOLO26s ExecuTorch model")
+    parser = argparse.ArgumentParser(description="Test YOLO26 ExecuTorch model")
     parser.add_argument("--image", type=str, default="test.jpg",
                         help="Path to test image (default: test.jpg)")
     parser.add_argument("--model", type=str, default=MODEL_PATH,
@@ -262,14 +241,13 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print("  YOLO26s ExecuTorch Test - Project Aletheia")
+    print("  YOLO26 ExecuTorch Test - Project Aletheia")
     print("=" * 60)
 
     # --- Step 1: Load Model ---
     print(f"\n[1/4] Loading model: {args.model}")
     if not os.path.exists(args.model):
         print(f"  ERROR: Model file not found at '{args.model}'")
-        print(f"  Make sure yolo26s_xnnpack_q8.pte is in the meta-yolo directory.")
         sys.exit(1)
 
     t0 = time.time()
@@ -283,8 +261,6 @@ def main():
     print(f"\n[2/4] Loading image: {args.image}")
     if not os.path.exists(args.image):
         print(f"  ERROR: Image not found at '{args.image}'")
-        print(f"  Please provide a test image. You can use any jpg/png file.")
-        print(f"  Example: python yolo.py --image /path/to/photo.jpg")
         sys.exit(1)
 
     image = cv2.imread(args.image)
@@ -298,7 +274,8 @@ def main():
     input_tensor, scale_info = preprocess(image)
     print(f"  Input tensor shape: {input_tensor.shape}")
     print(f"  Input tensor dtype: {input_tensor.dtype}")
-    print(f"  Input value range: [{input_tensor.min().item():.1f}, {input_tensor.max().item():.1f}]")
+    print(f"  Input value range: [{input_tensor.min().item():.4f}, {input_tensor.max().item():.4f}]")
+    print(f"  Tensor is contiguous: {input_tensor.is_contiguous()}")
 
     # Warm-up run
     print(f"  Warm-up run...")
@@ -312,7 +289,7 @@ def main():
     print(f"  Inference completed in {inference_time * 1000:.1f}ms")
     print(f"  Estimated FPS: {1.0 / inference_time:.1f}")
 
-    # Run 5 more times for average FPS
+    # Average FPS over 5 runs
     print(f"  Running 5 more iterations for average FPS...")
     times = []
     for _ in range(5):
@@ -333,9 +310,8 @@ def main():
 
     if len(detections) == 0:
         print("  No objects detected above confidence threshold.")
-        print("  Try lowering the threshold: --confidence 0.1")
+        print("  Try: --confidence 0.1")
     else:
-        # Table header
         print(f"  {'#':<4} {'Label':<18} {'Conf':<10} {'Box (x1,y1,x2,y2)':<28} {'Carbon'}")
         print(f"  {'-'*4} {'-'*18} {'-'*10} {'-'*28} {'-'*8}")
 
@@ -344,7 +320,7 @@ def main():
             print(f"  {i+1:<4} {det['label']:<18} {det['confidence']:<10.4f} "
                   f"({x1:>4}, {y1:>4}, {x2:>4}, {y2:>4})      {det['carbon_impact']}")
 
-    # Carbon summary for Aletheia integration
+    # Carbon summary
     if detections:
         print(f"\n  --- Carbon Impact Summary ---")
         counts = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
@@ -355,27 +331,18 @@ def main():
         print(f"  Low impact:     {counts['low']}")
         print(f"  Uncategorized:  {counts['unknown']}")
 
-        # Calculate carbon velocity (0.0 - 1.0) for Aletheia HUD
         total = len(detections)
         carbon_velocity = min(1.0,
             (counts["high"] * 0.3 + counts["medium"] * 0.15 + counts["low"] * 0.02) / max(total, 1)
         )
         print(f"\n  Estimated Carbon Velocity: {carbon_velocity:.2f}")
-        print(f"  (This value feeds into the EcoSprite and GreyFog in Aletheia OS)")
 
-    # Save annotated image if requested
+    # Save annotated image
     if args.save:
-        if detections:
-            annotated = draw_detections(image.copy(), detections)
-        else:
-            annotated = image.copy()
-            cv2.putText(annotated, "No detections", (50, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
+        annotated = draw_detections(image.copy(), detections) if detections else image.copy()
         output_path = os.path.join(os.path.dirname(os.path.abspath(args.image)), "output.jpg")
         cv2.imwrite(output_path, annotated)
         print(f"\n  Annotated image saved to: {output_path}")
-        print(f"  (Transfer to your Mac with: scp pi@<ip>:{output_path} .)")
 
     print("\n" + "=" * 60)
     print("  Test complete!")
