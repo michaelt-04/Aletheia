@@ -13,7 +13,7 @@ Usage:
     python yolo.py --image path/to/image.jpg --save  # Save annotated image
 
 Requirements:
-    pip install executorch opencv-python numpy
+    pip install executorch opencv-python numpy torch
 """
 
 import argparse
@@ -21,6 +21,7 @@ import time
 import sys
 import os
 import numpy as np
+import torch
 
 try:
     import cv2
@@ -36,7 +37,6 @@ except ImportError:
 
 
 # --- COCO 80 Class Names ---
-# YOLO26 is trained on COCO dataset with these 80 object classes
 COCO_CLASSES = [
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
     "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
@@ -53,7 +53,6 @@ COCO_CLASSES = [
 ]
 
 # --- Carbon impact categories for Aletheia ---
-# Maps COCO classes to carbon impact categories for your project
 CARBON_IMPACT = {
     # High impact - electronics and appliances
     "tv": "high", "laptop": "high", "cell phone": "high", "microwave": "high",
@@ -71,23 +70,25 @@ CARBON_IMPACT = {
 
 # --- Model Configuration ---
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yolo26s_xnnpack_q8.pte")
-INPUT_SIZE = 640          # YOLO26 expects 640x640 input
-CONFIDENCE_THRESHOLD = 0.25  # Minimum confidence to report a detection
+INPUT_SIZE = 640
+CONFIDENCE_THRESHOLD = 0.25
 
 
 def preprocess(image: np.ndarray):
     """
     Preprocess an image for YOLO26 inference.
 
+    IMPORTANT: This model expects float32 values in 0-255 range (NOT normalized to 0-1).
+
     Steps:
         1. Letterbox resize to 640x640 (preserves aspect ratio with padding)
         2. Convert BGR -> RGB
-        3. Normalize pixel values to [0, 1]
+        3. Convert to float32 (keep 0-255 range)
         4. Transpose from HWC to CHW format
-        5. Add batch dimension -> [1, 3, 640, 640]
+        5. Convert to torch tensor with batch dimension -> [1, 3, 640, 640]
 
     Returns:
-        input_tensor: np.ndarray of shape [1, 3, 640, 640], dtype float32
+        input_tensor: torch.Tensor of shape [1, 3, 640, 640], dtype float32, range 0-255
         scale_info:   tuple of (scale, (pad_w, pad_h)) for mapping coords back
     """
     h, w = image.shape[:2]
@@ -106,13 +107,11 @@ def preprocess(image: np.ndarray):
     top, left = int(pad_h), int(pad_w)
     canvas[top:top + new_h, left:left + new_w] = resized
 
-    # BGR -> RGB, normalize, HWC -> CHW, add batch dim
+    # BGR -> RGB, float32 (0-255, NOT normalized), HWC -> CHW, batch dim
     rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-    normalized = rgb.astype(np.float32) / 255.0
-    chw = np.transpose(normalized, (2, 0, 1))  # [3, 640, 640]
-    batched = np.expand_dims(chw, axis=0)       # [1, 3, 640, 640]
+    tensor = torch.tensor(rgb.astype(np.float32)).permute(2, 0, 1).unsqueeze(0)
 
-    return batched, (scale, (pad_w, pad_h))
+    return tensor, (scale, (pad_w, pad_h))
 
 
 def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESHOLD):
@@ -135,7 +134,7 @@ def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESH
     else:
         raw = output
 
-    # Convert to numpy if needed
+    # Convert to numpy
     if hasattr(raw, 'numpy'):
         raw = raw.numpy()
     raw = np.array(raw, dtype=np.float32)
@@ -146,8 +145,6 @@ def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESH
     if raw.size > 0:
         print(f"  Value range: [{raw.min():.4f}, {raw.max():.4f}]")
 
-    # --- Handle various possible output shapes ---
-
     # Remove batch dimension if present: [1, N, C] -> [N, C]
     if raw.ndim == 3:
         raw = raw[0]
@@ -157,57 +154,32 @@ def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESH
     if raw.ndim == 2 and raw.shape[-1] == 6:
         # Standard YOLO26 NMS-free format: [300, 6]
         # Each row: [x1, y1, x2, y2, confidence, class_id]
-        print(f"  Format detected: [N, 6] standard YOLO26 NMS-free")
+        print(f"  Format: [N, 6] standard YOLO26 NMS-free")
         boxes = raw[:, :4]
         confidences = raw[:, 4]
-        class_ids = raw[:, 5].astype(int)
+        class_ids = np.round(raw[:, 5]).astype(int)  # Round float class IDs
 
     elif raw.ndim == 2 and raw.shape[0] == 6:
-        # Transposed format: [6, 300] -> [300, 6]
-        print(f"  Format detected: [6, N] transposed -> converting")
+        print(f"  Format: [6, N] transposed -> converting")
         raw = raw.T
         boxes = raw[:, :4]
         confidences = raw[:, 4]
-        class_ids = raw[:, 5].astype(int)
+        class_ids = np.round(raw[:, 5]).astype(int)
 
     elif raw.ndim == 2 and raw.shape[-1] == 84:
-        # YOLOv8-style format: [N, 84] = [N, 4 + 80 class scores]
-        print(f"  Format detected: [N, 84] YOLOv8-style with class scores")
+        print(f"  Format: [N, 84] YOLOv8-style with class scores")
         boxes = raw[:, :4]
         class_scores = raw[:, 4:]
         confidences = np.max(class_scores, axis=1)
-        class_ids = np.argmax(class_scores, axis=1)
-
-    elif raw.ndim == 2 and raw.shape[0] == 84:
-        # Transposed YOLOv8-style: [84, N] -> [N, 84]
-        print(f"  Format detected: [84, N] transposed YOLOv8-style -> converting")
-        raw = raw.T
-        boxes = raw[:, :4]
-        class_scores = raw[:, 4:]
-        confidences = np.max(class_scores, axis=1)
-        class_ids = np.argmax(class_scores, axis=1)
-
-    elif raw.ndim == 2 and raw.shape[-1] == 85:
-        # YOLOv5-style format: [N, 85] = [N, 4 + obj_conf + 80 class scores]
-        print(f"  Format detected: [N, 85] YOLOv5-style")
-        boxes = raw[:, :4]
-        obj_conf = raw[:, 4]
-        class_scores = raw[:, 5:]
-        confidences = obj_conf * np.max(class_scores, axis=1)
         class_ids = np.argmax(class_scores, axis=1)
 
     else:
-        # Unknown format - dump info for debugging
         print(f"  WARNING: Unexpected output shape {raw.shape}")
-        print(f"  First 5 rows (or values):")
-        if raw.ndim >= 2:
-            for i in range(min(5, raw.shape[0])):
-                print(f"    Row {i}: {raw[i][:min(10, raw.shape[-1])]}")
-        else:
-            print(f"    {raw[:20]}")
-        print(f"\n  Cannot parse this format. Returning empty detections.")
-        print(f"  Please report this output shape to troubleshoot.")
+        print(f"  Cannot parse this format. Returning empty detections.")
         return []
+
+    print(f"  Confidence range: [{confidences.min():.6f}, {confidences.max():.6f}]")
+    print(f"  Detections above {conf_threshold}: {(confidences >= conf_threshold).sum()}")
 
     # Filter by confidence
     mask = confidences >= conf_threshold
@@ -228,9 +200,9 @@ def postprocess(output, scale_info, orig_shape, conf_threshold=CONFIDENCE_THRESH
         x2 = min(orig_w, (x2 - pad_w) / scale)
         y2 = min(orig_h, (y2 - pad_h) / scale)
 
-        # Get class name
-        cls_id = int(cls_id)
-        label = COCO_CLASSES[cls_id] if 0 <= cls_id < len(COCO_CLASSES) else f"class_{cls_id}"
+        # Get class name (clamp to valid range)
+        cls_id = int(np.clip(cls_id, 0, len(COCO_CLASSES) - 1))
+        label = COCO_CLASSES[cls_id]
 
         # Get carbon impact category
         impact = CARBON_IMPACT.get(label, "unknown")
@@ -312,7 +284,6 @@ def main():
     if not os.path.exists(args.image):
         print(f"  ERROR: Image not found at '{args.image}'")
         print(f"  Please provide a test image. You can use any jpg/png file.")
-        print(f"  Take a photo of your desk/room with common objects.")
         print(f"  Example: python yolo.py --image /path/to/photo.jpg")
         sys.exit(1)
 
@@ -327,8 +298,9 @@ def main():
     input_tensor, scale_info = preprocess(image)
     print(f"  Input tensor shape: {input_tensor.shape}")
     print(f"  Input tensor dtype: {input_tensor.dtype}")
+    print(f"  Input value range: [{input_tensor.min().item():.1f}, {input_tensor.max().item():.1f}]")
 
-    # Warm-up run (first run is often slower due to initialization)
+    # Warm-up run
     print(f"  Warm-up run...")
     _ = method.execute([input_tensor])
 
@@ -383,7 +355,7 @@ def main():
         print(f"  Low impact:     {counts['low']}")
         print(f"  Uncategorized:  {counts['unknown']}")
 
-        # Calculate a rough carbon velocity (0.0 - 1.0) for Aletheia HUD
+        # Calculate carbon velocity (0.0 - 1.0) for Aletheia HUD
         total = len(detections)
         carbon_velocity = min(1.0,
             (counts["high"] * 0.3 + counts["medium"] * 0.15 + counts["low"] * 0.02) / max(total, 1)
@@ -406,8 +378,7 @@ def main():
         print(f"  (Transfer to your Mac with: scp pi@<ip>:{output_path} .)")
 
     print("\n" + "=" * 60)
-    print("  Test complete! If detections look correct, this model is")
-    print("  ready to integrate into aletheia_os.py")
+    print("  Test complete!")
     print("=" * 60)
 
 
