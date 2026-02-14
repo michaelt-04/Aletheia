@@ -5,10 +5,10 @@
 pygame
 
 # For camera access on Raspberry Pi
-picamera2
+#picamera2
 
 # For hand gesture recognition
-#mediapipe
+mediapipe
 
 # OpenCV is a common dependency for computer vision tasks and mediapipe
 opencv-python
@@ -21,4 +21,4 @@ numpy
 # to ensure hardware acceleration. Refer to the official PyTorch and ExecuTorch
 # documentation for ARM64/aarch64 build instructions.
 torch
-executorch
+#executorch
