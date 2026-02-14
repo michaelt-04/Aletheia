@@ -71,14 +71,14 @@ class SpiritCompanion(pygame.sprite.Sprite):
         # --- MOVEMENT BEHAVIORS ---
         if state == "angry":
             # VIOLENT STAR ANIMATION
-            self.star_angle += 1.5 
-            r = 50 # Radius of the star points
+            self.star_angle += 1 
+            r = 0 # Radius of the star points
             points = [0, 144, 288, 72, 216]
             idx = int(self.star_angle % 5)
             target_angle = math.radians(points[idx])
             
             star_offset = pygame.Vector2(math.cos(target_angle) * r, math.sin(target_angle) * r)
-            jitter = pygame.Vector2(random.randint(-15, 15), random.randint(-15, 15))
+            jitter = pygame.Vector2(random.randint(-5, 5), random.randint(-5, 5))
             self.pos = self.home_pos + star_offset + jitter
             self.is_jumping = False
             
