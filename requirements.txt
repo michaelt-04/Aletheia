@@ -8,7 +8,7 @@ pygame
 picamera2
 
 # For hand gesture recognition
-mediapipe
+#mediapipe
 
 # OpenCV is a common dependency for computer vision tasks and mediapipe
 opencv-python
