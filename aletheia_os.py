@@ -8,6 +8,7 @@ import time
 import math
 import os
 import sys
+from aletheia_gui import EcoSprite, GreyFog, DetectionOverlay, HealthBar, ExperienceBar
 
 # from picamera2 import Picamera2 # Uncomment when on Raspberry Pi
 import cv2
@@ -39,150 +40,21 @@ shared_state = {
     "cpu_temp": 0.0,              # RPi CPU temperature
     "inference_ms": 0.0,          # Last YOLO inference time
     "detection_count": 0,         # Number of objects detected
+    "health": 100,                # Current health value (0-100)
+    "experience": 0,              # Current experience points
 }
 state_lock = threading.Lock()
 
 
 # --- AR HUD Components ---
 
-class EcoSprite(pygame.sprite.Sprite):
-    """
-    A floating entity whose appearance and behavior are tied to environmental data.
-    """
-    def __init__(self):
-        super().__init__()
-        self.image = pygame.Surface((50, 50), pygame.SRCALPHA)
-        pygame.draw.circle(self.image, (0, 255, 150), (25, 25), 25)
-        self.rect = self.image.get_rect(center=(SCREEN_WIDTH - 150, 150))
-
-        # Bobbing animation state
-        self.bob_angle = 0
-        self.bob_speed = 0.02
-        self.bob_amplitude = 10
-        self.base_y = self.rect.y
-
-        # State management
-        self.state = "calm"  # "calm", "agitated", "critical"
-
-    def update(self):
-        # 1. Bobbing Animation
-        self.bob_angle += self.bob_speed
-        if self.bob_angle > 2 * math.pi:
-            self.bob_angle -= 2 * math.pi
-        self.rect.y = self.base_y + int(self.bob_amplitude * math.sin(self.bob_angle))
-
-        # 2. State change based on Carbon Velocity
-        with state_lock:
-            carbon_v = shared_state["carbon_velocity"]
-
-        new_state = "calm"
-        if 0.3 <= carbon_v < 0.7:
-            new_state = "agitated"
-        elif carbon_v >= 0.7:
-            new_state = "critical"
-
-        if new_state != self.state:
-            self.state = new_state
-            self.update_appearance()
-
-    def update_appearance(self):
-        """Update sprite visuals based on its current state."""
-        self.image.fill((0, 0, 0, 0))  # Clear
-        if self.state == "calm":
-            pygame.draw.circle(self.image, (0, 255, 150), (25, 25), 25)
-        elif self.state == "agitated":
-            pygame.draw.circle(self.image, (255, 180, 0), (25, 25), 25)
-        elif self.state == "critical":
-            pygame.draw.circle(self.image, (255, 50, 50), (25, 25), 25)
-            pygame.draw.circle(self.image, (255, 255, 255), (25, 25), 25, width=3)
 
 
-class GreyFog:
-    """
-    An overlay that represents the carbon impact, becoming more opaque
-    as the 'carbon_velocity' increases.
-    """
-    def __init__(self):
-        self.surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        self.current_alpha = 0
-
-    def draw(self, screen):
-        with state_lock:
-            carbon_v = shared_state["carbon_velocity"]
-
-        target_alpha = int(carbon_v * 200)
-        self.current_alpha = self.current_alpha * 0.95 + target_alpha * 0.05
-
-        self.surface.fill((50, 50, 55, int(self.current_alpha)))
-        screen.blit(self.surface, (0, 0))
 
 
-class DetectionOverlay:
-    """
-    Draws detected objects and their carbon impact labels on the HUD.
-    Shows what the YOLO model is currently seeing.
-    """
-    def __init__(self):
-        self.font = pygame.font.Font(None, 28)
-        self.small_font = pygame.font.Font(None, 22)
-        self.impact_colors = {
-            "high": (255, 50, 50),       # Red
-            "medium": (255, 180, 0),     # Orange
-            "low": (0, 220, 100),        # Green
-            "unknown": (180, 180, 180),  # Grey
-        }
 
-    def draw(self, screen):
-        with state_lock:
-            detections = shared_state["detected_objects"]
 
-        for det in detections:
-            label = det["label"]
-            conf = det["confidence"]
-            impact = det.get("carbon_impact", "unknown")
-            color = self.impact_colors.get(impact, (180, 180, 180))
 
-            # Draw object label tag (floating near top-left of screen for AR overlay)
-            # In a full AR system these would be positioned in 3D space
-            # For now, show as a list on the left side
-            # (Box drawing is skipped since the camera feed isn't shown on the HUD)
-
-        # Draw detection summary panel on the left
-        if detections:
-            # Background panel
-            panel_h = min(len(detections), 8) * 30 + 50
-            panel_surface = pygame.Surface((320, panel_h), pygame.SRCALPHA)
-            panel_surface.fill((0, 0, 0, 140))
-            screen.blit(panel_surface, (20, 70))
-
-            # Title
-            title = self.font.render("Detected Objects", True, (255, 255, 255))
-            screen.blit(title, (30, 78))
-
-            # List objects (max 8)
-            y = 108
-            for i, det in enumerate(detections[:8]):
-                color = self.impact_colors.get(det.get("carbon_impact", "unknown"), (180, 180, 180))
-
-                # Impact dot
-                pygame.draw.circle(screen, color, (40, y + 8), 5)
-
-                # Label + confidence
-                text = f"{det['label']} ({det['confidence']:.0%})"
-                text_surf = self.small_font.render(text, True, (255, 255, 255))
-                screen.blit(text_surf, (52, y))
-
-                # Carbon impact tag
-                impact_text = det.get("carbon_impact", "?")
-                impact_surf = self.small_font.render(impact_text, True, color)
-                screen.blit(impact_surf, (260, y))
-
-                y += 30
-
-            if len(detections) > 8:
-                more = self.small_font.render(
-                    f"+{len(detections) - 8} more...", True, (150, 150, 150))
-                screen.blit(more, (52, y))
 
 
 # --- Background Threads ---
@@ -264,10 +136,12 @@ def main():
     font = pygame.font.Font(None, 36)
     small_font = pygame.font.Font(None, 28)
     clock = pygame.time.Clock()
-    eco_sprite = EcoSprite()
+    eco_sprite = EcoSprite(shared_state, state_lock)
     all_sprites = pygame.sprite.Group(eco_sprite)
-    grey_fog = GreyFog()
-    detection_overlay = DetectionOverlay()
+    grey_fog = GreyFog(shared_state, state_lock)
+    detection_overlay = DetectionOverlay(shared_state, state_lock)
+    health_bar = HealthBar(shared_state, state_lock)
+    experience_bar = ExperienceBar(shared_state, state_lock)
 
     # --- Cursor for hand tracking ---
     cursor_img = pygame.Surface((20, 20), pygame.SRCALPHA)
@@ -322,6 +196,10 @@ def main():
         # Draw detection overlay (object list)
         detection_overlay.draw(screen)
 
+        # Draw Health and Experience Bars
+        health_bar.draw(screen)
+        experience_bar.draw(screen)
+
         # Get latest state
         with state_lock:
             cursor_pos = shared_state["index_finger_tip"]
@@ -330,6 +208,15 @@ def main():
             cpu_temp = shared_state.get("cpu_temp", 0)
             inference_ms = shared_state.get("inference_ms", 0)
             det_count = shared_state.get("detection_count", 0)
+
+            # Placeholder for health/experience update (for demonstration)
+            if is_pinching:
+                # Decrease health and increase experience
+                shared_state["health"] = max(0, shared_state["health"] - 0.1)
+                shared_state["experience"] = min(100, shared_state["experience"] + 0.2)
+            else:
+                # Slowly regenerate health, no experience change
+                shared_state["health"] = min(100, shared_state["health"] + 0.05)
 
         # Draw the hand cursor
         cursor_img.fill((0, 0, 0, 0))
