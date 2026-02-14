@@ -1,6 +1,8 @@
 import pygame
 import math
 import threading
+import time
+import random
 
 # --- Global Configuration (needed for GUI elements) ---
 # These should ideally be passed in or derived from a config object
