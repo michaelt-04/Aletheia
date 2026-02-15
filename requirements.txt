@@ -7,8 +7,7 @@ opencv-python==4.11.0.86
 
 # Machine Learning & Hand Tracking
 # Note: mediapipe-rpi4 is used for optimized Pi 4 bindings
-mediapipe-rpi4==0.10.18
-protobuf==3.20.3
+
 
 # Vision and Tensors
 # Pinned to match your torch 2.9.1+cpu environment

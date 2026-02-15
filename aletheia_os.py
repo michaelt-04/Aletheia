@@ -9,7 +9,12 @@ import math
 import os
 import sys
 import numpy as np
-os.environ['GLOG_minloglevel'] = '2'
+
+# Feature flags
+# Set this to 0 to run YOLO + GUI only (no hand model required):
+#   ALETHEIA_ENABLE_HANDS=0 python aletheia_os.py
+ENABLE_HANDS = os.getenv("ALETHEIA_ENABLE_HANDS", "1") == "1"
+
 # RPi-specific camera controller (now also handles webcam fallback)
 from camera_rpi import get_camera_manager
 
@@ -18,453 +23,288 @@ from aletheia_gui import SpiritCompanion, GreyFog, DetectionOverlay, HealthBar, 
 
 # Vision libraries
 import cv2
-import mediapipe as mp
 
-# Add meta-yolo to path for YOLO imports
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "meta-yolo"))
+# Hand detection (optional): ExecuTorch BlazePalm (.pte)
+# Disabled by default via ALETHEIA_ENABLE_HANDS=0
+
+# YOLO Detection Components
 from yolo_engine import YOLODetector
-from executorch.runtime import Runtime # Needed by YOLODetector
 
+# --- Global Constants ---
+SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
+FPS = 60
 
-# --- Global Configuration ---
-SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
-BLACK = (0, 0, 0)
-VERSION = "Aletheia OS v0.4.0 RPi"
+# BlazePalm / hand detector model (.pte)
+BLAZEPALM_MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "blazepalm_xnnpack.pte"  # <-- replace with your actual .pte filename
+)
 
-# Path to YOLO model
+# YOLO Object Detection model path
 YOLO_MODEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "meta-yolo", "yolo26n_xnnpack.pte"
+    "yolo26n_xnnpack.pte"
 )
 
-# MediaPipe Hand Landmarker model
-HAND_LANDMARKER_MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "hand_landmarker.task"
-)
-
-# --- Shared State & Thread Safety ---
+# --- Shared State Dictionary ---
 shared_state = {
-    "carbon_velocity": 0.0,
-    "index_finger_tip": (0, 0),
     "is_pinching": False,
-    "detected_objects": [], # List of dicts from YOLO
-    "active_quests": {},    # Dict of {object_label: time_activated} for detected objects that are 'active quests'
-    "carbon_saved_g": 0.0,  # Total carbon saved in grams
-    "last_savings_event_time": 0.0, # Timestamp of last carbon saving event
-    "app_quit": False,
-    "cpu_temp": 0.0,
-    "yolo_inference_ms": 0.0,
-    "detection_count": 0,
+    "index_finger_tip": (0, 0),
+    "detections": [],
     "health": 100,
-    "missions_completed": 0,
-    "missions_total": 5
-    }
+    "mission": "Explore",
+    "carbon_saved": 0.0,
+    "app_quit": False,
+}
+
 state_lock = threading.Lock()
 
 
-# --- Thermal Management (Copied from yolo_live.py) ---
-def get_cpu_temp():
-    """
-    Read Raspberry Pi CPU temperature.
-    Returns temperature in Celsius, or -1 if not available.
-    """
-    try:
-        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-            temp = int(f.read().strip()) / 1000.0
-            return temp
-    except (FileNotFoundError, ValueError):
-        return -1.0
-
-
-def get_throttle_delay(temp, base_interval):
-    """
-    Calculate extra delay based on CPU temperature.
-
-    Thermal zones:
-        < 70°C  : No throttle (run at base_interval)
-        70-75°C : Slight slowdown (+1s)
-        75-80°C : Moderate slowdown (+3s)
-        80-85°C : Heavy throttle (+6s)
-        > 85°C  : Emergency throttle (+10s)
-
-    Returns:
-        Total interval (base + throttle) in seconds
-    """
-    if temp < 0:
-        return base_interval  # Temp not available, no throttle
-
-    if temp < 70:
-        return base_interval
-    elif temp < 75:
-        return base_interval + 1.0
-    elif temp < 80:
-        return base_interval + 3.0
-    elif temp < 85:
-        return base_interval + 6.0
-    else:
-        return base_interval + 10.0
-
-
-# --- YOLODetectionThread (Refactored from yolo_live.py) ---
-
+# --- YOLO Detection Thread ---
 class YoloDetectionThread(threading.Thread):
-    """
-    Background thread that receives camera frames, runs YOLO detection,
-    and updates a shared state dictionary.
-    """
-
-    def __init__(self, model_path, camera, shared_state, state_lock,
-                 base_interval=2.5, confidence=0.25):
-        super().__init__(daemon=True)
-        self.model_path = model_path
-        self.camera = camera
-        self.shared_state = shared_state
-        self.state_lock = state_lock
-        self.base_interval = base_interval
-        self.confidence = confidence
-        self._detector = None
-
-    def run(self):
-        print(f"[YoloDetectionThread] Starting...")
-        # Load model
-        try:
-            self._detector = YOLODetector(
-                self.model_path,
-                confidence_threshold=self.confidence
-            )
-        except Exception as e:
-            print(f"[YoloDetectionThread] ERROR loading model: {e}")
-            with self.state_lock:
-                self.shared_state["app_quit"] = True # Signal main app to quit on YOLO failure
-            return
-
-        print(f"[YoloDetectionThread] Waiting for camera frames...")
-        # Wait until the camera provides the first frame
-        while True:
-            if self.camera.get_frame() is not None:
-                print(f"[YoloDetectionThread] First frame received. Starting detection loop.")
-                break
-            with self.state_lock:
-                if self.shared_state["app_quit"]:
-                    return
-            time.sleep(0.5)
-
-        frame_count = 0
-        while True:
-            with self.state_lock:
-                if self.shared_state["app_quit"]:
-                    break
-
-            frame_rgb = self.camera.get_frame()
-            if frame_rgb is None:
-                time.sleep(0.01) # Wait for frames
-                continue
-            
-            # The YOLODetector expects BGR image, convert from RGB
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
-            t0 = time.time()
-            detections = self._detector.detect(frame_bgr)
-            inference_time = time.time() - t0
-
-            carbon_v = YOLODetector.compute_carbon_velocity(detections)
-            cpu_temp = get_cpu_temp()
-
-            with self.state_lock:
-                self.shared_state["detected_objects"] = detections
-                self.shared_state["carbon_velocity"] = carbon_v
-                self.shared_state["cpu_temp"] = cpu_temp
-                self.shared_state["yolo_inference_ms"] = inference_time * 1000
-                self.shared_state["detection_count"] = len(detections)
-
-            frame_count += 1
-            # print(f"[YoloDetectionThread] Detected {len(detections)} objects, Carbon V: {carbon_v:.2f}")
-
-            interval = get_throttle_delay(cpu_temp, self.base_interval)
-            sleep_time = max(0, interval - inference_time)
-            time.sleep(sleep_time)
-
-        print("[YoloDetectionThread] Stopped.")
-
-
-# --- HandTrackingThread (New implementation using MediaPipe Tasks API) ---
-
-class HandTrackingThread(threading.Thread):
-    """
-    Handles hand tracking using MediaPipe's HandLandmarker (async LIVE_STREAM mode)
-    on frames from the shared camera.
-    """
     def __init__(self, model_path, camera, shared_state, state_lock):
         super().__init__(daemon=True)
         self.model_path = model_path
         self.camera = camera
         self.shared_state = shared_state
         self.state_lock = state_lock
-        
-        self.landmarker = None
-        self.mp_hand_landmarks = None # Store results from callback
-        self.mp_image_timestamp = 0
-        
-        # MediaPipe Tasks API aliases
-        self.BaseOptions = mp.tasks.BaseOptions
-        self.HandLandmarker = mp.tasks.vision.HandLandmarker
-        self.HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-        self.VisionRunningMode = mp.tasks.vision.RunningMode
-
-        # Hand landmark indices
-        self.THUMB_TIP = 4
-        self.INDEX_FINGER_TIP = 8
-        self.PINCH_THRESHOLD = 0.05 # Distance threshold for pinch detection
-
-    def _on_hand_landmarker_result(self, result, output_image, timestamp_ms):
-        """Callback function for MediaPipe's LIVE_STREAM mode."""
-        self.mp_hand_landmarks = result.hand_landmarks
-        self.mp_image_timestamp = timestamp_ms
+        self.detector = None
+        self._got_first_frame = False
 
     def run(self):
-        print("[HandTrackingThread] Starting...")
-        # Load hand landmarker model
-        if not os.path.exists(self.model_path):
-            print(f"[HandTrackingThread] ERROR: Hand landmarker model not found at {self.model_path}")
+        print("[YoloDetectionThread] Starting...")
+
+        try:
+            self.detector = YOLODetector(self.model_path)
+        except Exception as e:
+            print(f"[YoloDetectionThread] ERROR loading YOLO model: {e}")
             with self.state_lock:
                 self.shared_state["app_quit"] = True
             return
 
-        options = self.HandLandmarkerOptions(
-            base_options=self.BaseOptions(model_asset_path=self.model_path),
-            running_mode=self.VisionRunningMode.LIVE_STREAM,
-            num_hands=1,
-            min_hand_detection_confidence=0.7,
-            result_callback=self._on_hand_landmarker_result,
-        )
+        print("[YoloDetectionThread] Waiting for camera frames...")
+        while True:
+            with self.state_lock:
+                if self.shared_state["app_quit"]:
+                    break
+
+            frame = self.camera.get_frame()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            if not self._got_first_frame:
+                print("[YoloDetectionThread] First frame received. Starting detection loop.")
+                self._got_first_frame = True
+
+            # frame should be RGB for our pipeline
+            # YOLODetector in this repo expects RGB numpy array
+            try:
+                detections = self.detector.detect(frame)
+            except Exception as e:
+                print(f"[YoloDetectionThread] ERROR during detection: {e}")
+                detections = []
+
+            with self.state_lock:
+                self.shared_state["detections"] = detections
+
+            time.sleep(0.03)  # ~30 FPS target-ish, tune as needed
+
+        print("[YoloDetectionThread] Stopped.")
+
+
+# --- HandTrackingThread (Replaced: ExecuTorch BlazePalm detector, no MediaPipe) ---
+class HandTrackingThread(threading.Thread):
+    """
+    Replaces MediaPipe with an ExecuTorch hand detector (.pte).
+
+    What it provides to the rest of Aletheia:
+      - shared_state["index_finger_tip"]: a cursor point (x,y) in screen coords
+      - shared_state["is_pinching"]: pinch boolean (placeholder: always False unless you add a landmarks model)
+
+    IMPORTANT:
+    BlazePalm is a *palm/hand box detector*. It does not output fingertip landmarks by default.
+    Until you add a landmark model, this thread sets cursor to the CENTER of the best detected hand box
+    and sets pinch=False.
+
+    If/when you export a landmarks model to .pte, extend this thread to:
+      1) detect hand box (BlazePalm)
+      2) crop/warp ROI
+      3) run landmarks model
+      4) compute pinch + fingertip
+    """
+
+    def __init__(self, model_path, camera, shared_state, state_lock,
+                 input_size=256, confidence=0.6):
+        super().__init__(daemon=True)
+        self.model_path = model_path
+        self.camera = camera
+        self.shared_state = shared_state
+        self.state_lock = state_lock
+        self.input_size = input_size
+        self.confidence = confidence
+        self.detector = None
+
+    def run(self):
+        print("[HandTrackingThread] Starting (ExecuTorch BlazePalm)...")
+
+        if not os.path.exists(self.model_path):
+            print(f"[HandTrackingThread] ERROR: BlazePalm .pte not found at {self.model_path}")
+            with self.state_lock:
+                self.shared_state["app_quit"] = True
+            return
+
         try:
-            self.landmarker = self.HandLandmarker.create_from_options(options)
+            from blazepalm_engine import BlazePalmDetector  # lazy import
+            self.detector = BlazePalmDetector(
+                self.model_path,
+                input_size=self.input_size,
+                confidence_threshold=self.confidence,
+            )
         except Exception as e:
-            print(f"[HandTrackingThread] ERROR: Could not create HandLandmarker: {e}")
+            print(f"[HandTrackingThread] ERROR loading BlazePalm model: {e}")
             with self.state_lock:
                 self.shared_state["app_quit"] = True
             return
 
         print("[HandTrackingThread] Waiting for camera frames...")
-        frame_timestamp_counter = 0
         while True:
             with self.state_lock:
                 if self.shared_state["app_quit"]:
                     break
-            
+
             frame_rgb = self.camera.get_frame()
             if frame_rgb is None:
-                time.sleep(0.01) # Wait for frames
+                time.sleep(0.01)
                 continue
-            
-            # Mirror frame for natural interaction
+
+            # Mirror for natural interaction (keep consistent with previous behavior)
             frame_rgb = cv2.flip(frame_rgb, 1)
 
-            # Send frame to MediaPipe async (non-blocking)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-            frame_timestamp_counter += 1
-            self.landmarker.detect_async(mp_image, frame_timestamp_counter)
-            
-            # Process results from the last callback
-            is_pinching_now = False
-            finger_tip_pos = (0, 0)
-            
-            if self.mp_hand_landmarks:
-                hand = self.mp_hand_landmarks[0]
-                thumb, index = hand[self.THUMB_TIP], hand[self.INDEX_FINGER_TIP]
-                
-                pinch_dist = math.hypot(index.x - thumb.x, index.y - thumb.y)
-                is_pinching_now = pinch_dist < self.PINCH_THRESHOLD
+            dets = self.detector.detect(frame_rgb)
 
-                # Convert normalized coordinates to screen coordinates
-                finger_tip_pos = (int(index.x * SCREEN_WIDTH), int(index.y * SCREEN_HEIGHT))
+            # Cursor behavior (temporary): use center of best hand box
+            cursor = (0, 0)
+            pinch = False
+
+            if dets:
+                best = dets[0]
+                # Convert from camera frame coords -> screen coords by scaling
+                h, w = frame_rgb.shape[:2]
+                cx, cy = best["center"]
+
+                # Use a slightly higher point (closer to "index area") to feel more like a pointer
+                x1, y1, x2, y2 = best["box"]
+                cy = int(y1 + (y2 - y1) * 0.25)
+
+                cursor = (int(cx * SCREEN_WIDTH / w), int(cy * SCREEN_HEIGHT / h))
 
             with self.state_lock:
-                self.shared_state["index_finger_tip"] = finger_tip_pos
-                self.shared_state["is_pinching"] = is_pinching_now
-            
-            time.sleep(0.01) # Small sleep to prevent busy-waiting
+                self.shared_state["index_finger_tip"] = cursor
+                self.shared_state["is_pinching"] = pinch
 
-        self.landmarker.close()
+            time.sleep(0.01)
+
         print("[HandTrackingThread] Stopped.")
 
 
 # --- Main Application Logic ---
-
 def main():
     pygame.init()
-    # Patch time module for SpiritCompanion to use pygame's time
-    # (SpiritCompanion expects a 'time' module with .time() and .get_ticks())
-    SpiritCompanion.time = pygame.time
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.NOFRAME)
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("Aletheia OS")
-    pygame.mouse.set_visible(False)
-
-    # --- GUI Components ---
-    font = pygame.font.Font(None, 36)
-    small_font = pygame.font.Font(None, 28)
     clock = pygame.time.Clock()
-    
-    spirit_companion = SpiritCompanion(shared_state, state_lock)
-    all_sprites = pygame.sprite.Group(spirit_companion)
-    grey_fog = GreyFog(shared_state, state_lock)
-    detection_overlay = DetectionOverlay(shared_state, state_lock)
-    health_bar = HealthBar(shared_state, state_lock)
-    carbon_savings_widget = CarbonSavingsWidget(shared_state, state_lock)
-    mission_tracker = MissionTracker(shared_state, state_lock)
 
+    # Init GUI Components
+    spirit = SpiritCompanion()
+    grey_fog = GreyFog()
+    overlay = DetectionOverlay()
+    health_bar = HealthBar()
+    mission_tracker = MissionTracker()
+    carbon_widget = CarbonSavingsWidget()
 
-    # --- Start Camera Controller ---
     print("[Main] Initializing Camera...")
-    # The get_camera_manager function handles RPi vs. Webcam
-    camera = get_camera_manager() 
+    camera = get_camera_manager()
     camera.start()
     print("[Main] Camera started.")
 
-    # --- Start Worker Threads ---
-    detection_thread = YoloDetectionThread(
+    # Start YOLO detection thread
+    yolo_thread = YoloDetectionThread(
         model_path=YOLO_MODEL_PATH,
         camera=camera,
         shared_state=shared_state,
         state_lock=state_lock
     )
-    detection_thread.start()
+    yolo_thread.start()
 
-    hand_thread = HandTrackingThread(
-        model_path=HAND_LANDMARKER_MODEL_PATH,
-        camera=camera,
-        shared_state=shared_state,
-        state_lock=state_lock
-    )
-    hand_thread.start()
+    # Start Hand thread (optional)
+    hand_thread = None
+    if ENABLE_HANDS:
+        hand_thread = HandTrackingThread(
+            model_path=BLAZEPALM_MODEL_PATH,
+            camera=camera,
+            shared_state=shared_state,
+            state_lock=state_lock
+        )
+        hand_thread.start()
+    else:
+        print("[Main] Hand tracking disabled (ALETHEIA_ENABLE_HANDS=0). Running YOLO+GUI only.")
 
-    # --- Main Loop ---
+    print("[Main] Entering main loop...")
+
     running = True
     while running:
+        dt = clock.tick(FPS) / 1000.0
+
+        # Handle events
         for event in pygame.event.get():
-            if event.type == pygame.QUIT or \
-               (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+            if event.type == pygame.QUIT:
                 running = False
 
-        # --- Update shared state with current time for SpiritCompanion ---
+        # Read shared state
         with state_lock:
-            # Check if any of the threads have signaled to quit
-            if shared_state["app_quit"]:
-                running = False
-            # Pass current time to shared state for accurate event tracking
-            shared_state["current_time"] = pygame.time.get_ticks() * 0.001
+            detections = shared_state.get("detections", [])
+            cursor = shared_state.get("index_finger_tip", (0, 0))
+            is_pinching = shared_state.get("is_pinching", False)
 
+        # Update UI logic
+        spirit.update(dt, cursor, is_pinching)
+        grey_fog.update(dt)
+        overlay.update(detections)
+        health_bar.update(shared_state.get("health", 100))
+        mission_tracker.update(shared_state.get("mission", "Explore"))
+        carbon_widget.update(shared_state.get("carbon_saved", 0.0))
 
-        # --- Quest Logic: Pinch-to-activate detected objects ---
-        with state_lock:
-            is_pinching = shared_state["is_pinching"]
-            index_finger_tip = shared_state["index_finger_tip"]
-            detected_objects = shared_state["detected_objects"]
-            active_quests = shared_state["active_quests"]
-            carbon_saved_g = shared_state["carbon_saved_g"]
-            missions_completed = shared_state["missions_completed"]
+        # Draw everything
+        screen.fill((0, 0, 0))
 
-        if is_pinching and index_finger_tip != (0,0):
-            finger_rect = pygame.Rect(index_finger_tip[0]-10, index_finger_tip[1]-10, 20, 20)
-            for obj in detected_objects:
-                obj_label = obj.get("label")
-                obj_box_coords = obj.get("box") # (x1, y1, x2, y2)
-                obj_impact = obj.get("carbon_impact", "unknown")
+        # Draw camera background if your GUI expects it (optional)
+        frame = camera.get_frame()
+        if frame is not None:
+            # frame is RGB; pygame expects (w,h) surface with 3 channels
+            # Convert to surface (note: pygame uses (width,height))
+            surf = pygame.surfarray.make_surface(np.rot90(frame))
+            surf = pygame.transform.scale(surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
+            screen.blit(surf, (0, 0))
 
-                if obj_label and obj_box_coords:
-                    obj_rect = pygame.Rect(obj_box_coords[0], obj_box_coords[1],
-                                           obj_box_coords[2]-obj_box_coords[0],
-                                           obj_box_coords[3]-obj_box_coords[1])
-                    
-                    if finger_rect.colliderect(obj_rect):
-                        if obj_label not in active_quests:
-                            # Activate quest: mark object as 'quested'
-                            active_quests[obj_label] = pygame.time.get_ticks() * 0.001 # Store activation time
-                            
-                            # Add carbon savings based on impact (example values)
-                            if obj_impact == "high":
-                                carbon_saved_g += 1000 # 1kg
-                            elif obj_impact == "medium":
-                                carbon_saved_g += 250 # 0.25kg
-                            elif obj_impact == "low":
-                                carbon_saved_g += 50 # 0.05kg
-                            
-                            missions_completed += 1
-                            print(f"[Main] Quest activated for '{obj_label}'! Carbon Saved: {carbon_saved_g/1000:.2f}kg")
-
-                            with state_lock:
-                                shared_state["carbon_saved_g"] = carbon_saved_g
-                                shared_state["active_quests"] = active_quests # Update the entire dict
-                                shared_state["missions_completed"] = missions_completed
-                                shared_state["last_savings_event_time"] = pygame.time.get_ticks() * 0.001
-
-
-        # --- Drawing ---
-        screen.fill(BLACK)
-
-        # Draw all GUI elements
+        overlay.draw(screen)
         grey_fog.draw(screen)
-        all_sprites.update() # SpiritCompanion update depends on carbon_velocity
-        all_sprites.draw(screen)
-        detection_overlay.draw(screen)
+        spirit.draw(screen)
         health_bar.draw(screen)
-        carbon_savings_widget.draw(screen)
         mission_tracker.draw(screen)
-
-        # Draw hand cursor
-        # Cursor needs to be drawn *after* GUI elements, but before status bar text
-        with state_lock:
-            cursor_pos = shared_state["index_finger_tip"]
-            is_pinching_draw = shared_state["is_pinching"]
-        
-        cursor_img = pygame.Surface((20, 20), pygame.SRCALPHA)
-        if is_pinching_draw:
-            pygame.draw.circle(cursor_img, (50, 255, 50, 220), (10, 10), 10, width=4)
-        else:
-            pygame.draw.circle(cursor_img, (255, 255, 255, 200), (10, 10), 10)
-        # Blit cursor at its position, clamped to screen bounds
-        cursor_rect = cursor_img.get_rect(center=cursor_pos)
-        cursor_rect.clamp_ip(screen.get_rect()) # Ensure cursor stays on screen
-        screen.blit(cursor_img, cursor_rect)
-
-
-        # --- Debug / Status Bar ---
-        with state_lock:
-            carbon_v = shared_state["carbon_velocity"]
-            det_count = shared_state["detection_count"]
-            cpu_temp = shared_state["cpu_temp"]
-            yolo_inference_ms = shared_state["yolo_inference_ms"]
-
-        temp_str = f"{cpu_temp:.0f}°C" if cpu_temp > 0 else "N/A"
-        temp_color = (255, 180, 0) if cpu_temp >= 70 else ((255, 50, 50) if cpu_temp >= 80 else (255, 255, 255))
-        
-        debug_text = f"{VERSION} | HUD FPS: {clock.get_fps():.0f} | Carbon: {carbon_v:.2f} | Objects: {det_count}"
-        text_surface = font.render(debug_text, True, (255, 255, 255))
-        screen.blit(text_surface, (20, 20))
-
-        bottom_text = f"CPU: {temp_str} | YOLO: {yolo_inference_ms:.0f}ms"
-        bottom_surface = small_font.render(bottom_text, True, temp_color)
-        screen.blit(bottom_surface, (20, SCREEN_HEIGHT - 40))
-
-        if cpu_temp >= 80:
-            warn_surface = font.render("⚠ THERMAL THROTTLE", True, (255, 50, 50))
-            screen.blit(warn_surface, (SCREEN_WIDTH // 2 - warn_surface.get_width() // 2, SCREEN_HEIGHT - 40))
+        carbon_widget.draw(screen)
 
         pygame.display.flip()
-        clock.tick(30) # Cap main loop at 30 FPS
 
-    # --- Shutdown ---
-    print("[Main] Shutdown signal received. Stopping threads...")
+    # Shutdown
+    print("[Main] Shutting down...")
     with state_lock:
         shared_state["app_quit"] = True
 
-    detection_thread.join(timeout=5)
-    hand_thread.join(timeout=5)
     camera.stop()
-    
     pygame.quit()
-    print("[Main] Aletheia OS has shut down cleanly.")
+    print("[Main] Goodbye.")
+
 
 if __name__ == "__main__":
     main()
