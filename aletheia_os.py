@@ -9,7 +9,7 @@ import math
 import os
 import sys
 import numpy as np
-
+os.environ['GLOG_minloglevel'] = '2'
 # RPi-specific camera controller (now also handles webcam fallback)
 from camera_rpi import get_camera_manager
 
