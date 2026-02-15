@@ -33,8 +33,8 @@ def hand_worker_fn(
     stop_event,
     screen_width,
     screen_height,
-    target_hz=15.0,
-    smoothing=0.1, # CHANGED: Lower smoothing (0.15 -> 0.1) for faster cursor
+    target_hz=30.0, # CHANGED: 15.0 -> 30.0 (Fast tracking)
+    smoothing=0.02, # CHANGED: 0.1 -> 0.02 (Raw, responsive input)
 ):
     """
     Hand tracking worker — runs in a separate process with its own GIL.
@@ -77,9 +77,9 @@ def hand_worker_fn(
     # Pinch state with hysteresis
     is_pinching = False
     
-    # CHANGED: Increased Grab distance (50 -> 60) to make pinching easier
-    PINCH_GRAB_DIST = 60     
-    PINCH_RELEASE_DIST = 75  # pixels — far enough to release pinch
+    # CHANGED: Easier pinching
+    PINCH_GRAB_DIST = 70     # Easier to grab
+    PINCH_RELEASE_DIST = 85  # Harder to drop
     
     grace_frames = 0
     MAX_GRACE = 4
@@ -124,9 +124,9 @@ def hand_worker_fn(
 
         if result is not None:
             if grace_frames >= MAX_GRACE:
-                # Optional: Log occasionally to verify tracking health
+                # Log occasional confidence
                 if now % 5.0 < 0.1:
-                    print(f"[HandWorker] Hand detected (conf={result['confidence']:.2f}, palm={result['palm_score']:.2f})")
+                     print(f"[HandWorker] Hand detected (conf={result['confidence']:.2f})")
             grace_frames = 0
             lm = result["landmarks_px"]
 
