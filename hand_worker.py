@@ -54,14 +54,25 @@ def hand_worker_fn(
 
     # Smoothing State
     smooth_x, smooth_y = 0.0, 0.0
-    
+
     # Pinch Configuration
     is_pinching = False
     PINCH_GRAB_DIST = 65     # px
     PINCH_RELEASE_DIST = 80  # px
-    
+
     grace_frames = 0
     MAX_GRACE = 4
+
+    # Palm caching: skip expensive palm detection most of the time
+    cached_palm = None
+    last_palm_time = 0.0
+    PALM_REDETECT_SECS = 3.0  # Full palm re-detection interval
+
+    # Downsampled detection size (model uses 256x256 internally anyway)
+    DETECT_W, DETECT_H = 320, 180
+
+    # Timing diagnostics
+    detect_count = 0
 
     while not stop_event.is_set():
         now = time.time()
@@ -84,15 +95,36 @@ def hand_worker_fn(
             print("[HandWorker] Tracking started.")
             got_first = True
 
+        # Downsample for faster preprocessing (model resizes to 256x256 internally)
+        detect_frame = cv2.resize(frame, (DETECT_W, DETECT_H), interpolation=cv2.INTER_NEAREST)
         if mirror:
-            frame = cv2.flip(frame, 1)
+            detect_frame = cv2.flip(detect_frame, 1)
 
+        # Decide whether to run full pipeline or landmarks-only
+        use_cache = cached_palm is not None and (now - last_palm_time) < PALM_REDETECT_SECS
+
+        t_start = time.perf_counter()
         try:
-            result = tracker.detect(frame)
+            if use_cache:
+                result = tracker.detect(detect_frame, cached_palm=cached_palm)
+            else:
+                result = tracker.detect(detect_frame)
         except:
             result = None
+        t_elapsed = time.perf_counter() - t_start
+
+        detect_count += 1
+        if detect_count <= 3 or detect_count % 20 == 0:
+            mode = "landmarks" if use_cache else "full"
+            print(f"[HandWorker] detect ({mode}): {t_elapsed*1000:.0f}ms")
 
         if result is not None:
+            # Cache palm for reuse
+            new_palm = result.get("_palm")
+            if new_palm is not None and not use_cache:
+                cached_palm = new_palm
+                last_palm_time = now
+
             grace_frames = 0
             lm = result["landmarks_px"]
             thumb = lm[THUMB_TIP]
@@ -105,15 +137,12 @@ def hand_worker_fn(
             elif is_pinching and dist_pinch > PINCH_RELEASE_DIST:
                 is_pinching = False
 
-            # 2. Map Raw Coordinates
-            h, w = frame.shape[:2]
-            raw_x = float(index[0]) * screen_width / max(w, 1)
-            raw_y = float(index[1]) * screen_height / max(h, 1)
+            # 2. Map to screen coordinates (detect_frame dimensions)
+            raw_x = float(index[0]) * screen_width / max(DETECT_W, 1)
+            raw_y = float(index[1]) * screen_height / max(DETECT_H, 1)
 
             # 3. Adaptive Smoothing
             move_dist = math.hypot(raw_x - smooth_x, raw_y - smooth_y)
-            # Fast movement (>150px) -> alpha ~0.85 (responsive)
-            # Slow movement (<10px)  -> alpha ~0.15 (smooth)
             alpha = 0.15 + (0.7 * min(move_dist / 150.0, 1.0))
 
             if smooth_x == 0.0:
@@ -125,7 +154,11 @@ def hand_worker_fn(
             cursor = (int(smooth_x), int(smooth_y))
         else:
             grace_frames += 1
-            if grace_frames > MAX_GRACE: is_pinching = False
+            if grace_frames > MAX_GRACE:
+                is_pinching = False
+            # Invalidate palm cache if hand lost too long
+            if grace_frames > MAX_GRACE * 2:
+                cached_palm = None
             cursor = (int(smooth_x), int(smooth_y))
 
         # Send

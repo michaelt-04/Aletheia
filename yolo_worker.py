@@ -39,7 +39,7 @@ def yolo_worker_fn(
 
     # Heavy imports happen HERE — the main process never loads these
     import torch
-    torch.set_num_threads(2)  # Limit XNNPACK threadpool to avoid contention on Pi 4
+    torch.set_num_threads(1)  # Limit XNNPACK threadpool — leave cores for hand tracking
     from meta_yolo.yolo_engine import YOLODetector
 
     # Attach to shared memory (main process owns create/unlink lifecycle)

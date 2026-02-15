@@ -237,37 +237,40 @@ class BlazeHandTracker:
 
     # ----- Main Detection -----
 
-    def detect(self, image):
+    def detect(self, image, cached_palm=None):
         """
         Full pipeline: image -> hand dict with landmarks, or None.
 
         Args:
             image: RGB image (H, W, 3) uint8
+            cached_palm: if provided, skip palm detection and reuse this palm
 
         Returns:
-            dict with landmarks_px [21,2], confidence, palm_score — or None
+            dict with landmarks_px [21,2], confidence, palm_score, _palm — or None
         """
-        tensor, scale_info = self._preprocess_palm(image)
-        palm_out = self._palm_method.execute([tensor])
-
-        # Parse: (regressions [1,N,18], classifications [1,N,1])
-        if isinstance(palm_out, (list, tuple)) and len(palm_out) >= 2:
-            rb = palm_out[0]
-            rs = palm_out[1]
+        if cached_palm is not None:
+            palm = cached_palm
         else:
-            return None
+            tensor, scale_info = self._preprocess_palm(image)
+            palm_out = self._palm_method.execute([tensor])
 
-        if hasattr(rs, 'numpy'): rs = rs.numpy()
-        if hasattr(rb, 'numpy'): rb = rb.numpy()
-        rs = np.array(rs, dtype=np.float32)
-        rb = np.array(rb, dtype=np.float32)
+            # Parse: (regressions [1,N,18], classifications [1,N,1])
+            if isinstance(palm_out, (list, tuple)) and len(palm_out) >= 2:
+                rb = palm_out[0]
+                rs = palm_out[1]
+            else:
+                return None
 
-        palms = self._decode_palms(rs, rb)
-        if not palms:
-            return None
+            if hasattr(rs, 'numpy'): rs = rs.numpy()
+            if hasattr(rb, 'numpy'): rb = rb.numpy()
+            rs = np.array(rs, dtype=np.float32)
+            rb = np.array(rb, dtype=np.float32)
 
-        # Take best palm only
-        palm = palms[0]
+            palms = self._decode_palms(rs, rb)
+            if not palms:
+                return None
+
+            palm = palms[0]
 
         crop, transform = self._crop_hand(image, palm)
         lm, flag = self._predict_landmarks(crop)
@@ -281,4 +284,5 @@ class BlazeHandTracker:
             "landmarks_px": lm_px,
             "confidence": float(flag),
             "palm_score": palm["score"],
+            "_palm": palm,
         }
