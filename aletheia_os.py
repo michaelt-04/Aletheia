@@ -229,8 +229,10 @@ def main():
 
     running = True
     cam_surface = None
-    cam_update_every = 1 if SHOW_CAMERA_BG else 3
+    cam_update_every = 2 if SHOW_CAMERA_BG else 3
     cam_counter = 0
+    # Camera resolution for surface (avoid expensive upscale to screen res in numpy)
+    CAM_W, CAM_H = 1280, 720
 
     # Frame feeder: copy camera frame to shared memory for both workers
     _max_worker_hz = max(YOLO_TARGET_HZ, HAND_TARGET_HZ) if ENABLE_HANDS else YOLO_TARGET_HZ
@@ -325,21 +327,26 @@ def main():
         _t_fill = time.perf_counter()
 
         # Camera background
+        # Work at camera resolution (1280x720) to avoid expensive full-screen
+        # numpy ops. pygame.transform.scale handles upscaling to display res.
         # transpose(1,0,2) converts (H,W,3) → (W,H,3) for surfarray without flipping.
-        # (np.rot90 would flip horizontally — wrong for forward-facing Pi camera)
         cam_counter += 1
         if cam_counter % cam_update_every == 0:
             frame = camera.get_frame()
             if frame is not None:
-                resized = cv2.resize(frame, (SCREEN_WIDTH, SCREEN_HEIGHT), interpolation=cv2.INTER_NEAREST)
-                arr = np.ascontiguousarray(resized.transpose(1, 0, 2))
+                if frame.shape[1] != CAM_W or frame.shape[0] != CAM_H:
+                    frame = cv2.resize(frame, (CAM_W, CAM_H), interpolation=cv2.INTER_NEAREST)
+                arr = np.ascontiguousarray(frame.transpose(1, 0, 2))
                 if cam_surface is None:
                     cam_surface = pygame.surfarray.make_surface(arr)
                 else:
                     pygame.surfarray.blit_array(cam_surface, arr)
 
         if SHOW_CAMERA_BG and cam_surface is not None:
-            screen.blit(cam_surface, (0, 0))
+            if SCREEN_WIDTH != CAM_W or SCREEN_HEIGHT != CAM_H:
+                screen.blit(pygame.transform.scale(cam_surface, (SCREEN_WIDTH, SCREEN_HEIGHT)), (0, 0))
+            else:
+                screen.blit(cam_surface, (0, 0))
 
         _t_camera = time.perf_counter()
 
