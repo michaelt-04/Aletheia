@@ -14,7 +14,7 @@ import threading
 import time
 
 # Import the RPi camera controller
-from camera_rpi import RPiCamera
+from camera_rpi import get_camera_manager
 
 # --- Configuration ---
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
@@ -55,8 +55,8 @@ def main():
     clock = pygame.time.Clock()
     small_font = pygame.font.Font(None, 24)
 
-    # --- RPi Camera setup ---
-    camera = RPiCamera(width=CAM_WIDTH, height=CAM_HEIGHT)
+    # --- Camera setup ---
+    camera = get_camera_manager(width=CAM_WIDTH, height=CAM_HEIGHT)
     camera.start()
     print("[TestScript] Waiting for camera to provide frames...")
     while camera.get_frame() is None:

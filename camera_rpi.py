@@ -1,15 +1,30 @@
 # camera_rpi.py
-# Centralized camera controller for Raspberry Pi using picamera2
+# Centralized camera controller for Raspberry Pi and generic webcams.
 #
-# This script creates a thread-safe class to manage the RPi camera.
-# It runs the camera in a separate thread and continuously captures frames,
-# making the latest frame available to other parts of the application.
+# This script provides a thread-safe class to manage a camera.
+# It automatically detects if it's running on a Raspberry Pi and uses the
+# efficient `picamera2` library, otherwise it falls back to using `cv2.VideoCapture`
+# for general webcam compatibility (e.g., on a Mac or PC).
 
 import time
 import threading
-from picamera2 import Picamera2
+import platform
+import cv2
+
+# --- Platform-specific camera implementation ---
+
+IS_RPI = platform.machine().startswith(('arm', 'aarch64'))
+
+if IS_RPI:
+    try:
+        from picamera2 import Picamera2
+        print("[CameraManager] Raspberry Pi detected. Using picamera2.")
+    except ImportError:
+        print("[CameraManager] WARNING: Running on a RPi-like architecture, but picamera2 is not installed.")
+        IS_RPI = False
 
 class RPiCamera:
+    """A thread-safe camera manager for the Raspberry Pi camera module."""
     def __init__(self, width=1280, height=720):
         print(f"[RPiCamera] Initializing camera with resolution {width}x{height}...")
         self.picam2 = Picamera2()
@@ -22,15 +37,10 @@ class RPiCamera:
         self.lock = threading.Lock()
         self.running = False
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
-        
         print("[RPiCamera] Initialization complete.")
 
     def start(self):
-        """Starts the camera and the background capture thread."""
-        if self.running:
-            print("[RPiCamera] Camera is already running.")
-            return
-            
+        if self.running: return
         print("[RPiCamera] Starting camera...")
         self.picam2.start()
         self.running = True
@@ -38,65 +48,109 @@ class RPiCamera:
         print("[RPiCamera] Capture thread started.")
 
     def stop(self):
-        """Stops the camera and the background thread."""
-        if not self.running:
-            print("[RPiCamera] Camera is not running.")
-            return
-            
+        if not self.running: return
         print("[RPiCamera] Stopping camera thread...")
         self.running = False
-        self.thread.join(timeout=2) # Wait for thread to finish
+        self.thread.join(timeout=2)
         self.picam2.stop()
         print("[RPiCamera] Camera stopped.")
 
     def _capture_loop(self):
-        """The main loop that continuously captures frames from the camera."""
         while self.running:
-            # capture_array() returns a numpy array
             captured_frame = self.picam2.capture_array()
-            
             with self.lock:
                 self.frame = captured_frame
-        
         print("[RPiCamera] Capture loop finished.")
 
     def get_frame(self):
-        """
-        Returns the most recent frame captured by the camera.
-        
-        Returns:
-            numpy.ndarray: The latest frame, or None if no frame is available.
-        """
         with self.lock:
-            if self.frame is not None:
-                return self.frame.copy()
-            return None
+            return self.frame.copy() if self.frame is not None else None
+
+class WebcamCamera:
+    """A thread-safe camera manager for generic webcams using OpenCV."""
+    def __init__(self, width=1280, height=720, camera_index=0):
+        print(f"[WebcamCamera] Initializing camera #{camera_index} with resolution {width}x{height}...")
+        self.cap = cv2.VideoCapture(camera_index)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"Could not open camera index {camera_index}.")
+        
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        
+        self.frame = None
+        self.lock = threading.Lock()
+        self.running = False
+        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+        print("[WebcamCamera] Initialization complete.")
+
+    def start(self):
+        if self.running: return
+        print("[WebcamCamera] Starting capture thread...")
+        self.running = True
+        self.thread.start()
+        print("[WebcamCamera] Capture thread started.")
+
+    def stop(self):
+        if not self.running: return
+        print("[WebcamCamera] Stopping camera thread...")
+        self.running = False
+        self.thread.join(timeout=2)
+        self.cap.release()
+        print("[WebcamCamera] Camera released.")
+
+    def _capture_loop(self):
+        while self.running:
+            ret, frame_bgr = self.cap.read()
+            if ret:
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                with self.lock:
+                    self.frame = frame_rgb
+            else:
+                # Add a small delay to prevent a tight loop on read error
+                time.sleep(0.01)
+        print("[WebcamCamera] Capture loop finished.")
+
+    def get_frame(self):
+        with self.lock:
+            return self.frame.copy() if self.frame is not None else None
+
+# --- Factory Function ---
+
+def get_camera_manager(width=1280, height=720):
+    """
+    Factory function that returns the appropriate camera manager based on the
+    detected hardware.
+    """
+    if IS_RPI:
+        return RPiCamera(width, height)
+    else:
+        print("[CameraManager] No RPi detected. Falling back to Webcam/OpenCV.")
+        return WebcamCamera(width, height)
+
+# --- Test Block ---
 
 if __name__ == '__main__':
-    # Example usage and test
-    print("--- RPiCamera Test ---")
+    print("--- CameraManager Test ---")
     
-    # This test is meant to be run on a Raspberry Pi with a camera module.
-    # It will initialize the camera, run it for 10 seconds, and then shut down.
-    
-    rpi_camera = RPiCamera()
-    rpi_camera.start()
+    # This test will now work on both RPi and other systems.
+    camera_manager = get_camera_manager()
+    camera_manager.start()
     
     try:
-        for i in range(10):
-            print(f"Loop {i+1}/10...")
-            frame = rpi_camera.get_frame()
+        for i in range(5):
+            print(f"Loop {i+1}/5...")
+            frame = camera_manager.get_frame()
             if frame is not None:
                 print(f"  - Got frame of shape: {frame.shape} and dtype: {frame.dtype}")
             else:
                 print("  - No frame available yet.")
             time.sleep(1)
             
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         print("
-Interrupted by user.")
+Interrupted.")
         
     finally:
         print("Shutting down camera.")
-        rpi_camera.stop()
+        camera_manager.stop()
         print("--- Test Complete ---")
