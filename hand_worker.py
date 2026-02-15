@@ -1,6 +1,7 @@
-# hand_worker.py - Adaptive Smoothing & Pinch Lock
+# hand_worker.py - Adaptive Smoothing
 # Out-of-process hand tracking worker for Project Aletheia
 
+import os
 import time
 import math
 import numpy as np
@@ -26,7 +27,9 @@ def hand_worker_fn(
     target_hz=30.0,
     smoothing=0.0, # Ignored, we use adaptive now
 ):
-    print("[HandWorker] Starting with Adaptive Smoothing...")
+    # Mirror flip: enable for selfie webcam testing, disable for Pi forward-facing camera
+    mirror = os.getenv("ALETHEIA_MIRROR", "0") == "1"
+    print(f"[HandWorker] Starting (mirror={'on' if mirror else 'off'})...")
 
     import torch
     torch.set_num_threads(2)
@@ -81,7 +84,8 @@ def hand_worker_fn(
             print("[HandWorker] Tracking started.")
             got_first = True
 
-        frame = cv2.flip(frame, 1)
+        if mirror:
+            frame = cv2.flip(frame, 1)
 
         try:
             result = tracker.detect(frame)
@@ -106,19 +110,12 @@ def hand_worker_fn(
             raw_x = float(index[0]) * screen_width / max(w, 1)
             raw_y = float(index[1]) * screen_height / max(h, 1)
 
-            # 3. Adaptive Smoothing (The Fix)
-            # Calculate how far the cursor wants to move this frame
+            # 3. Adaptive Smoothing
             move_dist = math.hypot(raw_x - smooth_x, raw_y - smooth_y)
-            
-            # Dynamic Alpha:
-            # - Fast movement (>150px) -> Alpha 0.8 (Fast/Responsive)
-            # - Slow movement (<10px)  -> Alpha 0.05 (Very Smooth/Stable)
-            alpha = 0.05 + (0.75 * min(move_dist / 150.0, 1.0))
-            
-            # PINCH LOCK: When pinching, force high stability to prevent "jump on click"
-            if is_pinching:
-                alpha *= 0.3  # Reduces sensitivity by 70% while holding
-            
+            # Fast movement (>150px) -> alpha ~0.85 (responsive)
+            # Slow movement (<10px)  -> alpha ~0.15 (smooth)
+            alpha = 0.15 + (0.7 * min(move_dist / 150.0, 1.0))
+
             if smooth_x == 0.0:
                 smooth_x, smooth_y = raw_x, raw_y
             else:

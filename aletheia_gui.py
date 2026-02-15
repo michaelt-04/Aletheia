@@ -58,14 +58,11 @@ class QuestManager:
 
     def _map_coords(self, box, sw, sh):
         x1, y1, x2, y2 = box
-        raw_cx = (x1 + x2) / 2
-        raw_cy = (y1 + y2) / 2
-        scale = YOLO_SIZE / max(CAMERA_WIDTH, CAMERA_HEIGHT)
-        img_h_in_yolo = CAMERA_HEIGHT * scale
-        pad_y = (YOLO_SIZE - img_h_in_yolo) / 2
-        norm_x = raw_cx / YOLO_SIZE
-        norm_y = (raw_cy - pad_y) / img_h_in_yolo
-        return int(norm_x * sw), int(norm_y * sh)
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        # YOLO postprocess already maps back to camera pixel space (0..1280, 0..720).
+        # Just scale linearly to screen dimensions.
+        return int(cx / CAMERA_WIDTH * sw), int(cy / CAMERA_HEIGHT * sh)
 
     def _update_tracked_targets(self, detections, sw, sh, dt):
         now = time.time()
