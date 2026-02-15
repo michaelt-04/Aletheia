@@ -4,10 +4,9 @@ yolo_engine.py - YOLO26 ExecuTorch Detection Engine for Project Aletheia
 
 Reusable module for YOLO26 object detection via ExecuTorch.
 
-This version adds SAFE filtering so:
-- "unknown" carbon items (book/scissors/etc.) are dropped by default
-- "person" is kept
-- natural/organic classes like banana/cat/dog/bird/potted plant are filtered out
+This version adds SAFE label filtering to reduce false positives:
+- Keeps ONLY "vampire electricity" / electronics / small appliances
+- Drops transport (car/airplane/etc.), animals, plants, food, sports gear, etc.
 
 IMPORTANT:
 - DO NOT filter or reorder COCO_CLASSES (class-id mapping must remain intact).
@@ -39,9 +38,11 @@ COCO_CLASSES = [
 ]
 
 # --- Carbon impact categories for Aletheia ---
+# NOTE: COCO doesn't include "charger" or "PC monitor" explicitly.
+# Best approximation is "tv" for monitor/display, plus laptop/keyboard/mouse/phone.
 CARBON_IMPACT = {
     # High impact - electronics and appliances
-    "tv": "high",
+    "tv": "high",            # treat as monitor/display/TV
     "laptop": "high",
     "cell phone": "high",
     "microwave": "high",
@@ -50,34 +51,39 @@ CARBON_IMPACT = {
     "refrigerator": "high",
     "hair drier": "high",
 
-    # Medium impact - transportation and consumer goods
-    "car": "medium",
-    "motorcycle": "medium",
-    "bus": "medium",
-    "truck": "medium",
-    "airplane": "medium",
-    "train": "medium",
-    "bottle": "medium",
-    "cup": "medium",
-    "backpack": "medium",
-    "suitcase": "medium",
-    "handbag": "medium",
+    # Medium impact - consumer electronics / accessories
+    "keyboard": "medium",
+    "mouse": "medium",
+    "remote": "medium",
 
-    # Low impact - keep PERSON (requested)
+    # Optional: keep person if you want presence to affect UI (set to low)
     "person": "low",
 }
 
-# --- Labels to filter out even if they have a carbon mapping or would be shown ---
-# User request: keep person, but remove pets/animals/fruit/veg/plants.
-LABEL_BLOCKLIST = {
-    # animals
-    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
-    # plants + food
-    "potted plant", "banana", "apple", "orange", "broccoli", "carrot",
+# --- STRICT allowlist: only keep labels relevant to vampire electricity/appliances ---
+# This is the main false-positive reducer.
+VAMPIRE_ELECTRICITY_LABELS = {
+    # displays / electronics
+    "tv",
+    "laptop",
+    "cell phone",
+    "keyboard",
+    "mouse",
+    "remote",
+
+    # small / major appliances
+    "microwave",
+    "oven",
+    "toaster",
+    "refrigerator",
+    "hair drier",
+
+    # Optional: keep "person" if you still want it detected
+    "person",
 }
 
-# If True, remove detections whose label is NOT in CARBON_IMPACT (e.g. book/scissors)
-FILTER_UNKNOWN_IMPACT = True
+# If True, we only keep labels in VAMPIRE_ELECTRICITY_LABELS
+STRICT_ALLOWLIST = True
 
 
 class YOLODetector:
@@ -85,7 +91,7 @@ class YOLODetector:
     YOLO26 object detector using ExecuTorch runtime.
 
     Handles preprocessing, inference, and postprocessing in one clean API.
-    Filtering is applied in postprocess() without affecting class-id mapping.
+    Applies safe filtering in postprocess() (does not affect class-id mapping).
     """
 
     def __init__(self, model_path, input_size=640, confidence_threshold=0.25):
@@ -99,6 +105,7 @@ class YOLODetector:
         self.program = runtime.load_program(model_path)
         self.method = self.program.load_method("forward")
 
+        # Warm up
         dummy = torch.zeros(1, 3, self.input_size, self.input_size, dtype=torch.float32).contiguous()
         self.method.execute([dummy])
 
@@ -107,6 +114,7 @@ class YOLODetector:
     def preprocess(self, image):
         h, w = image.shape[:2]
 
+        # Letterbox resize
         scale = min(self.input_size / h, self.input_size / w)
         new_w, new_h = int(w * scale), int(h * scale)
         pad_w = (self.input_size - new_w) / 2
@@ -118,6 +126,7 @@ class YOLODetector:
         top, left = int(pad_h), int(pad_w)
         canvas[top:top + new_h, left:left + new_w] = resized
 
+        # BGR -> RGB, normalize to [0,1], HWC -> CHW, add batch, contiguous
         rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         img_float = rgb.astype(np.float32) / 255.0
         tensor = torch.from_numpy(img_float).permute(2, 0, 1).unsqueeze(0).contiguous()
@@ -137,6 +146,7 @@ class YOLODetector:
         if raw.ndim == 3:
             raw = raw[0]  # [300, 6]
 
+        # [cx, cy, w, h, confidence, class_id]
         cx, cy, bw, bh = raw[:, 0], raw[:, 1], raw[:, 2], raw[:, 3]
         confidences = raw[:, 4]
         class_ids = np.round(raw[:, 5]).astype(int)
@@ -146,6 +156,7 @@ class YOLODetector:
         x2 = cx + bw / 2
         y2 = cy + bh / 2
 
+        # confidence filter
         mask = confidences >= self.confidence_threshold
         x1, y1, x2, y2 = x1[mask], y1[mask], x2[mask], y2[mask]
         confidences = confidences[mask]
@@ -159,15 +170,11 @@ class YOLODetector:
             cls_id = int(np.clip(class_ids[i], 0, len(COCO_CLASSES) - 1))
             label = COCO_CLASSES[cls_id]
 
-            # Filter out unwanted labels (but keep person)
-            if label in LABEL_BLOCKLIST:
+            # STRICT filtering to reduce hallucinations
+            if STRICT_ALLOWLIST and label not in VAMPIRE_ELECTRICITY_LABELS:
                 continue
 
             impact = CARBON_IMPACT.get(label, "unknown")
-
-            # Filter unknown-impact items (e.g. book/scissors/etc.)
-            if FILTER_UNKNOWN_IMPACT and impact == "unknown":
-                continue
 
             bx1 = max(0, (x1[i] - pad_w) / scale)
             by1 = max(0, (y1[i] - pad_h) / scale)
