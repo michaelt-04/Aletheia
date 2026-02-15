@@ -174,9 +174,8 @@ class HandTrackingThread(threading.Thread):
         print("[HandTrackingThread] Starting (ExecuTorch BlazePalm)...")
 
         if not os.path.exists(self.model_path):
-            print(f"[HandTrackingThread] ERROR: BlazePalm .pte not found at {self.model_path}")
-            with self.state_lock:
-                self.shared_state["app_quit"] = True
+            print(f"[HandTrackingThread] WARNING: BlazePalm .pte not found at {self.model_path}")
+            print("[HandTrackingThread] Hand tracking disabled — YOLO + GUI will continue.")
             return
 
         try:
@@ -187,9 +186,8 @@ class HandTrackingThread(threading.Thread):
                 confidence_threshold=self.confidence,
             )
         except Exception as e:
-            print(f"[HandTrackingThread] ERROR loading BlazePalm model: {e}")
-            with self.state_lock:
-                self.shared_state["app_quit"] = True
+            print(f"[HandTrackingThread] WARNING: could not load BlazePalm model: {e}")
+            print("[HandTrackingThread] Hand tracking disabled — YOLO + GUI will continue.")
             return
 
         print("[HandTrackingThread] Waiting for camera frames...")
