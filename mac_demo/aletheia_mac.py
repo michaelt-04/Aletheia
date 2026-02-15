@@ -264,7 +264,11 @@ def main():
             if frame is not None:
                 resized = cv2.resize(frame, (SCREEN_WIDTH, SCREEN_HEIGHT),
                                      interpolation=cv2.INTER_NEAREST)
-                cam_surface = pygame.surfarray.make_surface(np.rot90(resized))
+                arr = np.ascontiguousarray(np.rot90(resized))
+                if cam_surface is None:
+                    cam_surface = pygame.surfarray.make_surface(arr)
+                else:
+                    pygame.surfarray.blit_array(cam_surface, arr)
 
         if cam_surface is not None:
             screen.blit(cam_surface, (0, 0))

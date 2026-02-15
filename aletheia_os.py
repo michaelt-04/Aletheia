@@ -229,7 +229,7 @@ def main():
 
     running = True
     cam_surface = None
-    cam_update_every = 3  # update camera texture every N GUI frames
+    cam_update_every = 1 if SHOW_CAMERA_BG else 3
     cam_counter = 0
 
     # Frame feeder: copy camera frame to shared memory for both workers
@@ -324,13 +324,19 @@ def main():
 
         _t_fill = time.perf_counter()
 
-        # Camera background (throttled conversion with optimized pipeline)
+        # Camera background
+        # transpose(1,0,2) converts (H,W,3) → (W,H,3) for surfarray without flipping.
+        # (np.rot90 would flip horizontally — wrong for forward-facing Pi camera)
         cam_counter += 1
         if cam_counter % cam_update_every == 0:
             frame = camera.get_frame()
             if frame is not None:
                 resized = cv2.resize(frame, (SCREEN_WIDTH, SCREEN_HEIGHT), interpolation=cv2.INTER_NEAREST)
-                cam_surface = pygame.surfarray.make_surface(np.rot90(resized))
+                arr = np.ascontiguousarray(resized.transpose(1, 0, 2))
+                if cam_surface is None:
+                    cam_surface = pygame.surfarray.make_surface(arr)
+                else:
+                    pygame.surfarray.blit_array(cam_surface, arr)
 
         if SHOW_CAMERA_BG and cam_surface is not None:
             screen.blit(cam_surface, (0, 0))
