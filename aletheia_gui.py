@@ -83,7 +83,7 @@ class QuestManager:
                 best_match['data'] = det
             else:
                 self.tracked_targets.append({'x': cx, 'y': cy, 'last_seen': now, 'data': det})
-        self.tracked_targets = [t for t in self.tracked_targets if now - t['last_seen'] < 0.8]
+        self.tracked_targets = [t for t in self.tracked_targets if now - t['last_seen'] < 5.0]
 
         if not hasattr(self, '_logged_target') and self.tracked_targets:
             self._logged_target = True
@@ -138,11 +138,17 @@ class QuestManager:
 
         elif self.quest_state == "ACTIVE":
             rem = max(0.0, self.timer_duration - (current_time - self.timer_start))
-            res = self._draw_popup(screen, f"Challenge Active: {rem:.1f}s",
-                                   "1. Unplug the device.\n2. Confirm below.",
-                                   ["I Did It!", "Cancel"], cursor, clicked, (255, 100, 100))
-            if res == "I Did It!": self._complete_quest()
-            elif res == "Cancel": self.quest_state = "IDLE"; self.active_target = None
+            if rem <= 0.0:
+                # Timer expired — cancel quest
+                print("[Quest] Timer expired, cancelling quest.")
+                self.quest_state = "IDLE"
+                self.active_target = None
+            else:
+                res = self._draw_popup(screen, f"Challenge Active: {rem:.1f}s",
+                                       "1. Unplug the device.\n2. Confirm below.",
+                                       ["I Did It!", "Cancel"], cursor, clicked, (255, 100, 100))
+                if res == "I Did It!": self._complete_quest()
+                elif res == "Cancel": self.quest_state = "IDLE"; self.active_target = None
             self._draw_cursor(screen, cursor, is_pinching, False)
 
         self.was_pinching = is_pinching
