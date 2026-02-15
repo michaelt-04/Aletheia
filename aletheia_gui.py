@@ -1,6 +1,7 @@
 import pygame
 import math
 import random
+import time
 from typing import List, Tuple
 
 # --- Global Configuration ---
@@ -124,7 +125,7 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.shared_state = shared_state
         self.state_lock = state_lock
 
-        self.home_pos = pygame.Vector2(SCREEN_WIDTH // 4, SCREEN_HEIGHT // 2)
+        self.home_pos = pygame.Vector2(SCREEN_WIDTH // 10, SCREEN_HEIGHT // 2)
         self.pos = self.home_pos.copy()
 
         self.hover_angle = 0.0
@@ -136,6 +137,27 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
         # State management (driven by carbon_velocity)
         self.current_state = "calm"  # 'calm', 'angry', 'pristine'
+        self.fsm_state = "calm"  # strict FSM: calm -> angry -> pristine -> calm
+        self._pending_quest_complete = False
+
+        # Calm wander (non-circular): choose random waypoints and ease toward them
+        self._calm_waypoint = self.home_pos.copy()
+        self._next_waypoint_epoch = 0.0
+
+        # Angry shake (deterministic + smooth amplitude)
+        self._angry_amp = 0.0
+
+
+        # Jitter frequency controls (tune these to adjust how fast angry shakes)
+        self.angry_jitter_rate_x = 19.0
+        self.angry_jitter_rate_y = 23.0
+
+        # How long calm stays after pristine (seconds). Increase to make the green calm linger longer.
+        self.post_pristine_calm_seconds = 2.0
+
+        # After pristine finishes, hold calm for a short cooldown so it never snaps back to angry immediately
+        self._post_pristine_cooldown_until = 0.0
+
         self.current_color = pygame.Vector3(80, 255, 150)
 
         # Angry pulse timing (kept)
@@ -151,6 +173,16 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.transitioning_to_pristine = False
         self.transition_start_pos = self.pos.copy()
         self.transition_progress = 0.0
+
+        # Track last carbon-savings event we've reacted to (prevents resetting circle every frame)
+        self._last_seen_savings_event_time = 0.0
+        # Fallback: track last event text if timestamps aren't provided
+        self._last_seen_savings_event_text = ""
+
+        # Pristine celebration sequence state (transition in -> circle -> return home)
+        self._pristine_active = False
+        self._pristine_phase = "idle"  # "in", "circle", "return", "idle"
+        self._return_progress = 0.0
 
         # Target colors
         self.color_calm = pygame.Vector3(80, 255, 150)
@@ -207,25 +239,65 @@ class SpiritCompanion(pygame.sprite.Sprite):
     def update(self):
         self.image.fill((0, 0, 0, 0))
         now = pygame.time.get_ticks() * 0.001
+        epoch_now = time.time()
 
-        # --- State determination based on carbon_velocity ---
+        # --- State determination (STRICT ORDER) ---
+        # Desired order:
+        #   calm (default) -> angry (when waste detected) -> pristine (only on quest complete)
+        #   pristine ALWAYS returns to calm (never directly to angry)
         with self.state_lock:
-            carbon_v = self.shared_state.get("carbon_velocity", 0.0)
-            carbon_saved_event = self.shared_state.get("last_savings_event_time", 0.0)
+            carbon_saved_event_time = float(self.shared_state.get("last_savings_event_time", 0.0))
+            carbon_saved_event_text = str(self.shared_state.get("last_savings_event", ""))
+            energy_waste_count = int(self.shared_state.get("energy_waste_count", 0))
+            detections = self.shared_state.get("detected_objects", [])
 
-        # Pristine if savings event happened recently
-        if carbon_saved_event > now - 2.0:
-            self.current_state = "pristine"
-            self.celebration_phase = "circle"
-            self.celebration_progress = 0.0
-            self.circle_center = self.home_pos.copy()
-            self.transitioning_to_pristine = True
-            self.transition_progress = 0.0
-            self.transition_start_pos = self.pos.copy()
-        elif carbon_v > 0.3:
-            self.current_state = "angry"
-        else:
-            self.current_state = "calm"
+        # Waste detected signal (future-proof):
+        waste_present = energy_waste_count > 0 or any(d.get("carbon_impact") == "high" for d in detections)
+
+        # Detect a NEW quest completion / savings event (timestamp preferred; text fallback)
+        quest_complete = False
+        if carbon_saved_event_time > 0.0:
+            quest_complete = carbon_saved_event_time > self._last_seen_savings_event_time
+        elif carbon_saved_event_text:
+            quest_complete = carbon_saved_event_text != self._last_seen_savings_event_text
+
+        if quest_complete:
+            if carbon_saved_event_time > 0.0:
+                self._last_seen_savings_event_time = carbon_saved_event_time
+            if carbon_saved_event_text:
+                self._last_seen_savings_event_text = carbon_saved_event_text
+
+        # --- STRICT FSM transitions ---
+        if self.fsm_state == "calm":
+            # calm can ONLY go to angry (but never immediately after pristine)
+            if waste_present and epoch_now >= self._post_pristine_cooldown_until:
+                self.fsm_state = "angry"
+
+        elif self.fsm_state == "angry":
+            # angry can ONLY go to pristine
+            if quest_complete:
+                # Start pristine celebration exactly once per quest completion
+                self._pristine_active = True
+                self._pristine_phase = "in"
+                self.celebration_progress = 0.0
+                self.circle_center = self.home_pos.copy()
+
+                self.transitioning_to_pristine = True
+                self.transition_progress = 0.0
+                self.transition_start_pos = self.pos.copy()
+
+                self.fsm_state = "pristine"
+
+        elif self.fsm_state == "pristine":
+            # locked until pristine sequence finishes (movement section will set _pristine_active False)
+            if not self._pristine_active:
+                # pristine ALWAYS returns to calm, never directly to angry
+                self.fsm_state = "calm"
+                # hold calm briefly so it doesn't snap back to angry in the same moment
+                self._post_pristine_cooldown_until = epoch_now + self.post_pristine_calm_seconds
+
+        # Map FSM to render state
+        self.current_state = self.fsm_state
 
         # --- Smooth color transition ---
         lerp_speed = 0.05
@@ -241,59 +313,92 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.current_color.z += (target.z - self.current_color.z) * lerp_speed
         color = (int(self.current_color.x), int(self.current_color.y), int(self.current_color.z))
 
-        # --- Wing speed & breath ---
+        # --- Wing speed, breath & movement ---
+        draw_wings = True  # ensure defined for all states
+
         if self.current_state == "calm":
             wing_speed = 0.18
             breath = 1.0 + math.sin(now * TAU * 1.6) * 0.045
-            draw_wings = True
-        elif self.current_state == "pristine":
+
+        elif self.current_state == "angry":
+            wing_speed = 1.2
+            breath = 1.0
+
+        else:  # pristine
             wing_speed = 0.08
             breath = 1.0 + math.sin(now * TAU * 1.2) * 0.06
-            draw_wings = True
-        else:  # angry
-            wing_speed = 0.0
-            self.star_pulse_t = (self.star_pulse_t + 0.05) % 1.0
-            breath = 1.0 + math.sin(self.star_pulse_t * TWO_PI * 4) * 0.1
-            draw_wings = False
 
         self.wing_angle += wing_speed
         self.hover_angle += 0.08
 
         # --- Movement ---
         if self.current_state == "angry":
-            jitter_x = random.randint(-10, 10)
-            jitter_y = random.randint(-10, 10)
-            self.pos.x = self.home_pos.x + jitter_x
-            self.pos.y = self.home_pos.y + jitter_y
+            # Deterministic, strong shake with smooth amplitude (consistent feel)
+            target_amp = 22.0
+            self._angry_amp += (target_amp - self._angry_amp) * 0.10
+            self.pos.x = self.home_pos.x + math.sin(now * self.angry_jitter_rate_x) * self._angry_amp
+            self.pos.y = self.home_pos.y + math.cos(now * self.angry_jitter_rate_y) * self._angry_amp
 
         elif self.current_state == "pristine":
+            # Celebration: transition to circle, do ONE full loop, then return home.
             circle_radius = 80
-            circle_speed = 0.025
+            circle_speed = 0.018  # ~1 loop in ~0.9s at 60fps
 
-            if self.transitioning_to_pristine:
+            if self._pristine_phase == "in":
+                # Lerp into the circle start point (right side of the circle)
                 self.transition_progress += 0.02
                 if self.transition_progress >= 1.0:
                     self.transition_progress = 1.0
                     self.transitioning_to_pristine = False
+                    self._pristine_phase = "circle"
 
                 t = self.transition_progress
                 target_x = self.circle_center.x + circle_radius
                 target_y = self.circle_center.y
                 self.pos.x = self.transition_start_pos.x + (target_x - self.transition_start_pos.x) * t
                 self.pos.y = self.transition_start_pos.y + (target_y - self.transition_start_pos.y) * t
-            else:
+
+            elif self._pristine_phase == "circle":
+                # Circle once; when completed, begin returning home
                 self.celebration_progress += circle_speed
+                if self.celebration_progress >= 1.0:
+                    self.celebration_progress = 1.0
+                    self._pristine_phase = "return"
+                    self._return_progress = 0.0
+                    self._return_start_pos = self.pos.copy()
+
                 angle = self.celebration_progress * TWO_PI
                 self.pos.x = self.circle_center.x + math.cos(angle) * circle_radius
                 self.pos.y = self.circle_center.y + math.sin(angle) * circle_radius
 
+            elif self._pristine_phase == "return":
+                # Lerp from current position back to home
+                self._return_progress += 0.03
+                if self._return_progress >= 1.0:
+                    self._return_progress = 1.0
+                    self._pristine_phase = "idle"
+                    self._pristine_active = False  # celebration complete
+
+                t = self._return_progress
+                start = getattr(self, "_return_start_pos", self.pos)
+                self.pos.x = start.x + (self.home_pos.x - start.x) * t
+                self.pos.y = start.y + (self.home_pos.y - start.y) * t
+
+            else:
+                # Safety fallback: end pristine if phase is unknown
+                self._pristine_active = False
+                self._pristine_phase = "idle"
+
         else:  # calm
-            drift_x = math.sin(now * 1.2) * 30
-            drift_y = math.cos(now * 0.8) * 25
-            target_x = self.home_pos.x + drift_x
-            target_y = self.home_pos.y + drift_y
-            self.pos.x += (target_x - self.pos.x) * 0.08
-            self.pos.y += (target_y - self.pos.y) * 0.08
+            # Non-circular calm wander: pick a waypoint occasionally and ease toward it
+            if epoch_now >= self._next_waypoint_epoch:
+                self._next_waypoint_epoch = epoch_now + random.uniform(2.0, 4.0)
+                self._calm_waypoint = self.home_pos + pygame.Vector2(
+                    random.uniform(-45, 45),
+                    random.uniform(-30, 30),
+                )
+            self.pos.x += (self._calm_waypoint.x - self.pos.x) * 0.03
+            self.pos.y += (self._calm_waypoint.y - self.pos.y) * 0.03
 
         self.rect.center = (int(self.pos.x), int(self.pos.y))
 

@@ -3,30 +3,25 @@
 #
 # Usage:
 # python spirit_test.py
-#
-# This script is designed to run on a development machine (like macOS)
-# to test all GUI elements from aletheia_gui.py without needing a camera,
-# a working YOLO model, or Raspberry Pi-specific hardware.
 
 import pygame
 import threading
 import time
 import math
-import random  # SpiritCompanion uses this but doesn't import it, so we do.
+import random
 
 from aletheia_gui import (
     SpiritCompanion,
-    GreyFog,
     DetectionOverlay,
     HealthBar,
     MissionTracker,
-    CarbonSavingsWidget,   # ✅ NEW
+    CarbonSavingsWidget,
 )
 
 # --- Configuration ---
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
 BLACK = (0, 0, 0)
-VERSION = "GUI Test Harness v1.1 (with Carbon Tracker)"
+VERSION = "GUI Test Harness v1.4 (Calm -> Angry -> Pristine -> Calm)"
 
 # --- Mock Shared State & Lock ---
 shared_state = {
@@ -41,11 +36,16 @@ shared_state = {
     "health": 100,
     "experience": 0,
 
-    # ✅ NEW: carbon savings tracker state
+    # Carbon savings tracker state
     "carbon_saved_g": 0.0,
     "last_savings_event": "",
+    "last_savings_event_time": 0.0,  # ✅ reliable pristine trigger
+
     "missions_completed": 2,
     "missions_total": 5,
+
+    # Optional future hook (won’t hurt if GUI ignores it)
+    "energy_waste_count": 0,
 }
 state_lock = threading.Lock()
 
@@ -53,31 +53,24 @@ state_lock = threading.Lock()
 def main():
     pygame.init()
 
-    # Setup display
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption(VERSION)
 
-    # --- Instantiate all GUI Components ---
     spirit_companion = SpiritCompanion(shared_state, state_lock)
     all_sprites = pygame.sprite.Group(spirit_companion)
 
-    grey_fog = GreyFog(shared_state, state_lock)
     detection_overlay = DetectionOverlay(shared_state, state_lock)
     health_bar = HealthBar(shared_state, state_lock)
     mission_tracker = MissionTracker(shared_state, state_lock)
-
-    # ✅ NEW: Carbon Savings Widget
     carbon_widget = CarbonSavingsWidget(shared_state, state_lock)
 
-    # Fonts for test info display
     font = pygame.font.Font(None, 36)
     clock = pygame.time.Clock()
 
-    # --- Main Test Loop ---
     running = True
     start_time = time.time()
 
-    # Mock data for cycling
+    # Mock detections for overlay visuals (optional)
     mock_detections = [
         {"label": "laptop", "confidence": 0.88, "carbon_impact": "high"},
         {"label": "bottle", "confidence": 0.75, "carbon_impact": "medium"},
@@ -86,77 +79,93 @@ def main():
         {"label": "book", "confidence": 0.81, "carbon_impact": "unknown"},
     ]
 
-    last_save_time = time.time()
+    # Ensures we trigger pristine only once per cycle
+    pristine_fired = False
 
     while running:
         # --- Event Handling ---
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                running = False
 
-        # --- Simulate State Changes ---
-        elapsed_time = time.time() - start_time
+        elapsed = time.time() - start_time
 
-        # 1. Cycle carbon_velocity from 0.0 to 1.0 and back every 10 seconds
-        carbon_cycle = (math.sin(elapsed_time * (2 * math.pi / 10)) + 1) / 2
+        # --- State order: calm -> angry -> pristine -> calm (repeat) ---
+        # calm:   0-5s
+        # angry:  5-9s
+        # pristine trigger moment: at 9s (once)
+        # resolved/calm after: 9-14s (pristine animation runs in GUI, then eases back)
+        cycle_len = 14.0
+        t = elapsed % cycle_len
 
-        # 2. Cycle health and experience
-        health_cycle = (math.cos(elapsed_time * 0.5) + 1) / 2 * 100
-        xp_cycle = int((elapsed_time * 5) % 100)
+        if t < 5.0:
+            phase = "calm"
+            pristine_fired = False
+            carbon_v = 0.10
+            waste_count = 0
 
-        # 3. Simulate mouse as hand cursor and pinch on click
+        elif t < 9.0:
+            phase = "angry"
+            carbon_v = 0.85          # > 0.3 so GUI shows angry :contentReference[oaicite:1]{index=1}
+            waste_count = 3
+
+        else:
+            phase = "resolved->pristine"
+            carbon_v = 0.05
+            waste_count = 0
+
+        # Other simulated values
+        health_cycle = (math.cos(elapsed * 0.5) + 1) / 2 * 100
+        xp_cycle = int((elapsed * 5) % 100)
         mouse_pos = pygame.mouse.get_pos()
         is_pinching_now = pygame.mouse.get_pressed()[0]
 
-        # 4. Cycle through mock detections
-        num_dets = int(((math.sin(elapsed_time * 0.8) + 1) / 2) * (len(mock_detections) + 1))
+        # Mock detection list (for overlay only)
+        num_dets = int(((math.sin(elapsed * 0.8) + 1) / 2) * (len(mock_detections) + 1))
+        det_list = mock_detections[:num_dets]
 
-        # ✅ 5. Simulate "carbon saved" events every ~3 seconds
-        now = time.time()
-        if now - last_save_time > 3.0:
-            saved = random.randint(60, 260)  # grams
-            with state_lock:
+        with state_lock:
+            # Inputs
+            shared_state["carbon_velocity"] = carbon_v
+            shared_state["energy_waste_count"] = waste_count
+
+            # Fire quest completion ONCE at start of resolved phase
+            if phase == "resolved->pristine" and not pristine_fired:
+                pristine_fired = True
+                saved = random.randint(60, 260)
                 shared_state["carbon_saved_g"] += saved
                 shared_state["last_savings_event"] = f"Saved {saved}g from eco swap"
-            last_save_time = now
+                shared_state["last_savings_event_time"] = time.time()  # ✅ key: timestamp trigger
+                shared_state["missions_completed"] += 1
 
-        # Update the shared state dictionary (must use lock)
-        with state_lock:
-            shared_state["carbon_velocity"] = carbon_cycle
+            # Other state
             shared_state["health"] = health_cycle
             shared_state["experience"] = xp_cycle
             shared_state["index_finger_tip"] = mouse_pos
             shared_state["is_pinching"] = is_pinching_now
-            shared_state["detected_objects"] = mock_detections[:num_dets]
-            shared_state["detection_count"] = len(mock_detections[:num_dets])
+            shared_state["detected_objects"] = det_list
+            shared_state["detection_count"] = len(det_list)
 
-        # --- Pygame Update and Draw ---
+        # --- Update and Draw ---
         all_sprites.update()
 
         screen.fill(BLACK)
 
-        # Draw all GUI components (order matters)
-        grey_fog.draw(screen)
         all_sprites.draw(screen)
-
-        # ✅ Draw carbon tracker (top-left)
         carbon_widget.draw(screen)
-
         detection_overlay.draw(screen)
         health_bar.draw(screen)
         mission_tracker.draw(screen)
 
-        # Draw a mock cursor (since the real one is in the OS)
+        # Cursor
         cursor_color = (50, 255, 50) if is_pinching_now else (255, 255, 255)
         pygame.draw.circle(screen, cursor_color, mouse_pos, 10, 3)
 
-        # Draw test info
-        info_text = f"Carbon Velocity: {carbon_cycle:.2f} | Detections: {num_dets}"
-        info_surface = font.render(info_text, True, (255, 255, 255))
-        screen.blit(info_surface, (20, 20))
+        # Debug info
+        info_text = f"Phase(test): {phase} | carbon_velocity={carbon_v:.2f} | waste_count={waste_count}"
+        screen.blit(font.render(info_text, True, (255, 255, 255)), (20, 20))
 
         pygame.display.flip()
         clock.tick(60)
