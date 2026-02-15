@@ -266,7 +266,7 @@ def main():
     clock = pygame.time.Clock()
 
     # Init GUI Components
-    spirit = SpiritCompanion()
+    spirit = SpiritCompanion(shared_state, state_lock)
     grey_fog = GreyFog()
     overlay = DetectionOverlay()
     health_bar = HealthBar()
