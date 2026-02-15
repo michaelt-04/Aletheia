@@ -62,7 +62,8 @@ state_lock = threading.Lock()
 
 # --- YOLO Detection Thread ---
 class YoloDetectionThread(threading.Thread):
-    def __init__(self, model_path, camera, shared_state, state_lock):
+    def __init__(self, model_path, camera, shared_state, state_lock,
+                 target_hz=10):
         super().__init__(daemon=True)
         self.model_path = model_path
         self.camera = camera
@@ -70,6 +71,7 @@ class YoloDetectionThread(threading.Thread):
         self.state_lock = state_lock
         self.detector = None
         self._got_first_frame = False
+        self.target_hz = float(target_hz)
 
     def run(self):
         print("[YoloDetectionThread] Starting...")
@@ -83,22 +85,34 @@ class YoloDetectionThread(threading.Thread):
             return
 
         print("[YoloDetectionThread] Waiting for camera frames...")
+
+        period = 1.0 / max(self.target_hz, 0.1)
+        next_t = time.time()
+
         while True:
             with self.state_lock:
                 if self.shared_state["app_quit"]:
                     break
 
+            # Rate-limit to target_hz (time-based, smooth cadence)
+            now = time.time()
+            if now < next_t:
+                time.sleep(min(0.002, next_t - now))
+                continue
+
+            # Schedule the next tick; if we fell behind, don't drift forever
+            next_t += period
+            if now - next_t > 0.5:
+                next_t = now + period
+
             frame = self.camera.get_frame()
             if frame is None:
-                time.sleep(0.01)
                 continue
 
             if not self._got_first_frame:
                 print("[YoloDetectionThread] First frame received. Starting detection loop.")
                 self._got_first_frame = True
 
-            # frame should be RGB for our pipeline
-            # YOLODetector in this repo expects RGB numpy array
             try:
                 detections = self.detector.detect(frame)
             except Exception as e:
@@ -108,34 +122,25 @@ class YoloDetectionThread(threading.Thread):
             with self.state_lock:
                 self.shared_state["detections"] = detections
 
-            time.sleep(0.03)  # ~30 FPS target-ish, tune as needed
-
         print("[YoloDetectionThread] Stopped.")
 
 
-# --- HandTrackingThread (Replaced: ExecuTorch BlazePalm detector, no MediaPipe) ---
+# --- HandTrackingThread (ExecuTorch BlazePalm detector, no MediaPipe) ---
 class HandTrackingThread(threading.Thread):
     """
-    Replaces MediaPipe with an ExecuTorch hand detector (.pte).
+    Uses ExecuTorch hand detector (.pte). Provides:
+      - shared_state["index_finger_tip"]: cursor point (x,y) in screen coords
+      - shared_state["is_pinching"]: pinch boolean (placeholder False)
 
-    What it provides to the rest of Aletheia:
-      - shared_state["index_finger_tip"]: a cursor point (x,y) in screen coords
-      - shared_state["is_pinching"]: pinch boolean (placeholder: always False unless you add a landmarks model)
-
-    IMPORTANT:
-    BlazePalm is a *palm/hand box detector*. It does not output fingertip landmarks by default.
-    Until you add a landmark model, this thread sets cursor to the CENTER of the best detected hand box
-    and sets pinch=False.
-
-    If/when you export a landmarks model to .pte, extend this thread to:
-      1) detect hand box (BlazePalm)
-      2) crop/warp ROI
-      3) run landmarks model
-      4) compute pinch + fingertip
+    Smoothness:
+      - Runs at target_hz (default 18Hz)
+      - Applies light exponential smoothing to cursor to reduce jitter
+        without noticeable added latency.
     """
-
     def __init__(self, model_path, camera, shared_state, state_lock,
-                 input_size=256, confidence=0.6):
+                 input_size=256, confidence=0.6,
+                 target_hz=18,
+                 smoothing=0.35):
         super().__init__(daemon=True)
         self.model_path = model_path
         self.camera = camera
@@ -143,7 +148,16 @@ class HandTrackingThread(threading.Thread):
         self.state_lock = state_lock
         self.input_size = input_size
         self.confidence = confidence
+        self.target_hz = float(target_hz)
+
+        # smoothing in [0..1]:
+        #   0.0 = no smoothing (most responsive, most jitter)
+        #   0.25-0.45 = good on Pi
+        #   1.0 = extremely smooth but laggy (avoid)
+        self.smoothing = float(smoothing)
+
         self.detector = None
+        self._cursor_f = None  # float cursor for smoothing
 
     def run(self):
         print("[HandTrackingThread] Starting (ExecuTorch BlazePalm)...")
@@ -168,44 +182,79 @@ class HandTrackingThread(threading.Thread):
             return
 
         print("[HandTrackingThread] Waiting for camera frames...")
+
+        period = 1.0 / max(self.target_hz, 0.1)
+        next_t = time.time()
+
         while True:
             with self.state_lock:
                 if self.shared_state["app_quit"]:
                     break
 
-            frame_rgb = self.camera.get_frame()
-            if frame_rgb is None:
-                time.sleep(0.01)
+            # Rate-limit to target_hz
+            now = time.time()
+            if now < next_t:
+                time.sleep(min(0.002, next_t - now))
                 continue
 
-            # Mirror for natural interaction (keep consistent with previous behavior)
+            next_t += period
+            if now - next_t > 0.5:
+                next_t = now + period
+
+            frame_rgb = self.camera.get_frame()
+            if frame_rgb is None:
+                continue
+
+            # Mirror for natural interaction
             frame_rgb = cv2.flip(frame_rgb, 1)
 
-            dets = self.detector.detect(frame_rgb)
+            try:
+                dets = self.detector.detect(frame_rgb)
+            except Exception as e:
+                print(f"[HandTrackingThread] ERROR during detect: {e}")
+                dets = []
 
-            # Cursor behavior (temporary): use center of best hand box
-            cursor = (0, 0)
+            # Cursor behavior: best hand box -> use "upper" point in box
+            cursor = None
             pinch = False
 
             if dets:
                 best = dets[0]
-                # Convert from camera frame coords -> screen coords by scaling
                 h, w = frame_rgb.shape[:2]
                 cx, cy = best["center"]
 
-                # Use a slightly higher point (closer to "index area") to feel more like a pointer
                 x1, y1, x2, y2 = best["box"]
                 cy = int(y1 + (y2 - y1) * 0.25)
 
-                cursor = (int(cx * SCREEN_WIDTH / w), int(cy * SCREEN_HEIGHT / h))
+                sx = float(cx) * SCREEN_WIDTH / max(w, 1)
+                sy = float(cy) * SCREEN_HEIGHT / max(h, 1)
+                cursor = (sx, sy)
+
+            # If no detection this frame, keep last cursor (prevents snapping to 0,0)
+            if cursor is None:
+                if self._cursor_f is not None:
+                    cursor = self._cursor_f
+                else:
+                    cursor = (0.0, 0.0)
+
+            # Exponential smoothing (low latency)
+            if self._cursor_f is None:
+                self._cursor_f = cursor
+            else:
+                a = self.smoothing
+                self._cursor_f = (
+                    self._cursor_f[0] * a + cursor[0] * (1.0 - a),
+                    self._cursor_f[1] * a + cursor[1] * (1.0 - a),
+                )
+
+            cursor_int = (int(self._cursor_f[0]), int(self._cursor_f[1]))
 
             with self.state_lock:
-                self.shared_state["index_finger_tip"] = cursor
+                self.shared_state["index_finger_tip"] = cursor_int
                 self.shared_state["is_pinching"] = pinch
 
-            time.sleep(0.01)
-
         print("[HandTrackingThread] Stopped.")
+
 
 
 # --- Main Application Logic ---

@@ -113,12 +113,20 @@ class RPiCamera:
                 time.sleep(0.05)
 
             # Avoid pegging a CPU core unnecessarily
-            time.sleep(0.005)
+            time.sleep(0.01)
         print("[RPiCamera] Capture loop finished.")
 
     def get_frame(self):
+        # Fast path: return latest frame reference (NO COPY).
+        # IMPORTANT: treat returned array as READ-ONLY.
+        with self.lock:
+            return self.frame
+
+    def get_frame_copy(self):
+        # Safe path: returns a copy for any code that will draw/mutate the frame.
         with self.lock:
             return self.frame.copy() if self.frame is not None else None
+
 
 
 class WebcamCamera:
@@ -168,6 +176,13 @@ class WebcamCamera:
         print("[WebcamCamera] Capture loop finished.")
 
     def get_frame(self):
+    # Fast path: return latest frame reference (NO COPY).
+        # IMPORTANT: treat returned array as READ-ONLY.
+        with self.lock:
+            return self.frame
+
+    def get_frame_copy(self):
+        # Safe path: returns a copy for any code that will draw/mutate the frame.
         with self.lock:
             return self.frame.copy() if self.frame is not None else None
 
