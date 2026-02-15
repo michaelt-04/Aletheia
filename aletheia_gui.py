@@ -34,7 +34,7 @@ class QuestManager:
     """
     Manages Quests with Coordinate Fix + Big Buttons.
     """
-    __slots__ = ("shared_state", "state_lock", "font_title", "font_body", "font_timer", "fog_sprite", "active_target", "quest_state", "timer_start", "timer_duration", "was_pinching", "carbon_table", "tracked_targets", "_logged_target", "_dbg_count")
+    __slots__ = ("shared_state", "state_lock", "font_title", "font_body", "font_timer", "fog_sprite", "active_target", "quest_state", "timer_start", "timer_duration", "carbon_table", "tracked_targets", "_logged_target", "_dbg_count", "_state_change_time")
 
     def __init__(self, shared_state, state_lock):
         self.shared_state = shared_state; self.state_lock = state_lock
@@ -49,12 +49,9 @@ class QuestManager:
 
         self.active_target = None; self.quest_state = "IDLE"
         self.timer_start = 0.0; self.timer_duration = 30.0
-        self.was_pinching = False
+        self._state_change_time = 0.0
         self.tracked_targets = []
         self.carbon_table = {"high": 500.0, "medium": 150.0, "low": 10.0}
-
-    def _is_clicked(self, cursor, is_pinching):
-        return is_pinching and not self.was_pinching
 
     def _map_coords(self, box, sw, sh):
         x1, y1, x2, y2 = box
@@ -95,11 +92,14 @@ class QuestManager:
         is_pinching = state_snapshot.get("is_pinching", False)
         cursor = state_snapshot.get("index_finger_tip", (0, 0))
         detections = state_snapshot.get("detected_objects", [])
-        clicked = self._is_clicked(cursor, is_pinching)
         current_time = time.time()
         sw, sh = screen.get_size()
         
         self._update_tracked_targets(detections, sw, sh, dt)
+
+        # Cooldown: ignore fist for 0.6s after any state transition so the
+        # gesture that triggered the transition doesn't immediately click through.
+        cooldown_ok = (current_time - self._state_change_time) > 0.6
 
         if self.quest_state == "IDLE":
             hovering = False
@@ -109,11 +109,11 @@ class QuestManager:
                 dist = math.hypot(cursor[0]-cx, cursor[1]-cy)
                 if dist < 100:
                     hovering = True
-                    if is_pinching:
+                    if is_pinching and cooldown_ok:
                         print(f"[Quest] CLICKED fog at ({cx},{cy}), cursor at {cursor}")
                         self.active_target = target['data']
                         self.quest_state = "OFFER"
-                        self.was_pinching = True
+                        self._state_change_time = current_time
             # Debug: log cursor-to-fog distance periodically
             if not hasattr(self, '_dbg_count'): self._dbg_count = 0
             self._dbg_count += 1
@@ -126,32 +126,40 @@ class QuestManager:
         elif self.quest_state == "OFFER":
             if self.active_target:
                 label = self.active_target.get("label", "Device")
+                # Use persistent is_pinching (not rising edge) so slow Pi
+                # hand tracking doesn't need to catch a brief open→close transition.
                 res = self._draw_popup(screen, "Vampire Power Detected!",
                                        f"This {label} is wasting energy.\nStart Unplug Challenge?",
-                                       ["Accept Quest", "Ignore"], cursor, clicked)
+                                       ["Accept Quest", "Ignore"], cursor,
+                                       is_pinching and cooldown_ok)
                 if res == "Accept Quest":
                     self.quest_state = "ACTIVE"; self.timer_start = current_time
+                    self._state_change_time = current_time
                 elif res == "Ignore":
                     self.quest_state = "IDLE"; self.active_target = None
-            else: self.quest_state = "IDLE"
+                    self._state_change_time = current_time
+            else:
+                self.quest_state = "IDLE"
+                self._state_change_time = current_time
             self._draw_cursor(screen, cursor, is_pinching, False)
 
         elif self.quest_state == "ACTIVE":
             rem = max(0.0, self.timer_duration - (current_time - self.timer_start))
             if rem <= 0.0:
-                # Timer expired — cancel quest
                 print("[Quest] Timer expired, cancelling quest.")
                 self.quest_state = "IDLE"
                 self.active_target = None
+                self._state_change_time = current_time
             else:
                 res = self._draw_popup(screen, f"Challenge Active: {rem:.1f}s",
                                        "1. Unplug the device.\n2. Confirm below.",
-                                       ["I Did It!", "Cancel"], cursor, clicked, (255, 100, 100))
+                                       ["I Did It!", "Cancel"], cursor,
+                                       is_pinching and cooldown_ok, (255, 100, 100))
                 if res == "I Did It!": self._complete_quest()
-                elif res == "Cancel": self.quest_state = "IDLE"; self.active_target = None
+                elif res == "Cancel":
+                    self.quest_state = "IDLE"; self.active_target = None
+                    self._state_change_time = current_time
             self._draw_cursor(screen, cursor, is_pinching, False)
-
-        self.was_pinching = is_pinching
 
     def _draw_cursor(self, screen, cursor, is_pinching, hovering):
         cx, cy = cursor
@@ -225,6 +233,7 @@ class QuestManager:
             self.shared_state["last_savings_event_time"] = time.time()
             self.shared_state["energy_waste_count"] = 0
         self.quest_state = "IDLE"; self.active_target = None
+        self._state_change_time = time.time()
 
 
 # =========================
