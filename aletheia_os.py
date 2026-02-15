@@ -48,7 +48,8 @@ ENABLE_HANDS = os.getenv("ALETHEIA_ENABLE_HANDS", "1") == "1"
 from camera_rpi import get_camera_manager
 
 # GUI Components (repo-accurate: most widgets are draw-only; Spirit is a Sprite)
-from aletheia_gui import SpiritCompanion, DetectionOverlay, HealthBar, MissionTracker, CarbonSavingsWidget
+# --- ADDED QuestManager to imports ---
+from aletheia_gui import SpiritCompanion, DetectionOverlay, HealthBar, MissionTracker, CarbonSavingsWidget, QuestManager
 
 # YOLO worker — runs in a separate process to avoid GIL contention
 from yolo_worker import yolo_worker_fn
@@ -128,6 +129,9 @@ def main():
     health_bar = HealthBar(shared_state, state_lock)
     mission_tracker = MissionTracker(shared_state, state_lock)
     carbon_widget = CarbonSavingsWidget(shared_state, state_lock)
+
+    # --- ADDED QuestManager Initialization ---
+    quest_manager = QuestManager(shared_state, state_lock)
 
     print("[Main] Initializing Camera...")
     camera = get_camera_manager()
@@ -333,6 +337,9 @@ def main():
         health_bar.draw(screen, state_snapshot)
         mission_tracker.draw(screen, state_snapshot)
         carbon_widget.draw(screen, state_snapshot)
+
+        # --- ADDED QuestManager Draw Call ---
+        quest_manager.draw(screen, state_snapshot, dt)
 
         _t_widgets = time.perf_counter()
 
