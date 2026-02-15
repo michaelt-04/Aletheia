@@ -12,16 +12,33 @@ import platform
 import cv2
 
 # --- Platform-specific camera implementation ---
-
-IS_RPI = platform.machine().startswith(('arm', 'aarch64'))
+print("[CameraManager] Starting platform detection...")
+IS_RPI = False
+try:
+    machine = platform.machine()
+    print(f"[CameraManager] platform.machine() returned: '{machine}'")
+    if machine.startswith(('arm', 'aarch64')):
+        print("[CameraManager] ARM architecture detected. This appears to be a Raspberry Pi.")
+        IS_RPI = True
+    else:
+        print(f"[CameraManager] Non-ARM architecture ('{machine}') detected.")
+except Exception as e:
+    print(f"[CameraManager] An exception occurred during platform detection: {e}")
 
 if IS_RPI:
+    print("[CameraManager] Attempting to import 'picamera2'...")
     try:
         from picamera2 import Picamera2
-        print("[CameraManager] Raspberry Pi detected. Using picamera2.")
-    except ImportError:
-        print("[CameraManager] WARNING: Running on a RPi-like architecture, but picamera2 is not installed.")
-        IS_RPI = False
+        print("[CameraManager] Successfully imported 'picamera2'.")
+    except ImportError as e:
+        print(f"[CameraManager] FAILED to import 'picamera2'. The library might not be installed correctly.")
+        print(f"[CameraManager] Error details: {e}")
+        IS_RPI = False # Fallback to Webcam
+    except Exception as e:
+        print(f"[CameraManager] An unexpected error occurred while importing 'picamera2'.")
+        print(f"[CameraManager] Error details: {e}")
+        IS_RPI = False # Fallback to Webcam
+
 
 class RPiCamera:
     """A thread-safe camera manager for the Raspberry Pi camera module."""
