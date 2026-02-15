@@ -118,6 +118,8 @@ def hand_worker_fn(
             result = None
 
         if result is not None:
+            if grace_frames >= MAX_GRACE:
+                print(f"[HandWorker] Hand detected (conf={result['confidence']:.2f}, palm={result['palm_score']:.2f})")
             grace_frames = 0
             lm = result["landmarks_px"]
 
@@ -129,8 +131,10 @@ def hand_worker_fn(
             pinch_dist = math.hypot(thumb[0] - index[0], thumb[1] - index[1])
             if not is_pinching and pinch_dist < PINCH_GRAB_DIST:
                 is_pinching = True
+                print(f"[HandWorker] PINCH detected (dist={pinch_dist:.0f}px)")
             elif is_pinching and pinch_dist > PINCH_RELEASE_DIST:
                 is_pinching = False
+                print(f"[HandWorker] PINCH released (dist={pinch_dist:.0f}px)")
 
             # Cursor = index finger tip, mapped to screen coordinates
             h, w = frame.shape[:2]
