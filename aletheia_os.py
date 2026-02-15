@@ -9,6 +9,9 @@ import os
 import numpy as np
 import cv2
 
+# Change E: prefer kmsdrm for direct GPU access (falls back to X11 if unavailable)
+os.environ.setdefault("SDL_VIDEODRIVER", "kmsdrm")
+
 
 def resolve_model_path(filename: str) -> str:
     base = os.path.dirname(os.path.abspath(__file__))
@@ -27,7 +30,8 @@ def resolve_model_path(filename: str) -> str:
     print("[ModelPath] ERROR: model file not found. Tried:")
     for p in candidates:
         print("  -", p)
-    return candidates[0]  
+    return candidates[0]
+
 # Feature flags
 # Run YOLO + GUI only:
 #   ALETHEIA_ENABLE_HANDS=0 python aletheia_os.py
@@ -44,9 +48,9 @@ from aletheia_gui import SpiritCompanion, DetectionOverlay, HealthBar, MissionTr
 from meta_yolo.yolo_engine import YOLODetector
 
 
-# --- Global Constants ---
+# --- Global Constants (Change H: configurable via env vars) ---
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
-FPS = 60
+FPS = int(os.getenv("ALETHEIA_FPS", "30"))
 
 # BlazePalm / hand detector model (.pte)
 BLAZEPALM_MODEL_PATH = resolve_model_path("blazepalm_xnnpack.pte")
@@ -254,12 +258,16 @@ class HandTrackingThread(threading.Thread):
 
 def main():
     pygame.init()
+    print(f"[Main] SDL video driver: {pygame.display.get_driver()}")
+    print(f"[Main] FPS target: {FPS} (set ALETHEIA_FPS to change)")
+
     # Fullscreen (no borders), use the display's native resolution
     flags = pygame.FULLSCREEN | pygame.NOFRAME | pygame.HWSURFACE | pygame.DOUBLEBUF
     screen = pygame.display.set_mode((0, 0), flags)
 
     # Update constants to actual fullscreen resolution
     SCREEN_WIDTH, SCREEN_HEIGHT = screen.get_size()
+    print(f"[Main] Display resolution: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
 
     pygame.mouse.set_visible(False)
     pygame.display.set_caption("Aletheia OS")
@@ -307,15 +315,36 @@ def main():
 
     running = True
     cam_surface = None
-    cam_update_every = 3  # update camera texture every N GUI frames (~20fps at 60fps)
+    cam_update_every = 3  # update camera texture every N GUI frames
     cam_counter = 0
 
+    # --- Instrumentation (Change A) ---
+    _perf_enabled = os.getenv("ALETHEIA_PERF_LOG", "1") == "1"
+    _perf_file = None
+    _frame_num = 0
+    if _perf_enabled:
+        try:
+            _perf_file = open("/tmp/aletheia_perf.csv", "w")
+            _perf_file.write("frame,t_event,t_snapshot,t_update,t_fill,t_camera,t_widgets,t_flip,t_total,fps\n")
+            print("[Perf] Logging to /tmp/aletheia_perf.csv (set ALETHEIA_PERF_LOG=0 to disable)")
+        except OSError:
+            _perf_enabled = False
+
+    # FPS console print timer (Change J)
+    _next_fps_print = time.time() + 2.0
+
     while running:
-        clock.tick(FPS)
+        # Change C: dt from clock.tick (milliseconds -> seconds)
+        dt_ms = clock.tick(FPS)
+        dt = min(dt_ms / 1000.0, 0.1)  # clamp to prevent huge jumps
+
+        _t0 = time.perf_counter()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+
+        _t_event = time.perf_counter()
 
         # If hands disabled, use mouse as cursor/pinch for testing
         if not ENABLE_HANDS:
@@ -324,41 +353,75 @@ def main():
                 shared_state["index_finger_tip"] = (mx, my)
                 shared_state["is_pinching"] = pygame.mouse.get_pressed()[0]
 
-        # --- Single state snapshot for this frame (eliminates 6+ lock acquisitions) ---
+        # --- Single state snapshot for this frame ---
         with state_lock:
             state_snapshot = dict(shared_state)
 
-        # Update Spirit (pass snapshot to avoid per-widget locking)
-        spirit_group.update(state_snapshot)
+        _t_snapshot = time.perf_counter()
+
+        # Update Spirit (pass snapshot + dt for frame-rate-independent animation)
+        spirit_group.update(state_snapshot, dt)
+
+        _t_update = time.perf_counter()
 
         # Draw
         screen.fill((0, 0, 0))
+
+        _t_fill = time.perf_counter()
 
         # Camera background (throttled conversion with optimized pipeline)
         cam_counter += 1
         if cam_counter % cam_update_every == 0:
             frame = camera.get_frame()
             if frame is not None:
-                # Resize with OpenCV first (SIMD-optimized, much faster than pygame.transform.scale)
-                # then rot90 for pygame's (W, H, C) axis order — rot90 is a free view, no copy
                 resized = cv2.resize(frame, (SCREEN_WIDTH, SCREEN_HEIGHT), interpolation=cv2.INTER_NEAREST)
                 cam_surface = pygame.surfarray.make_surface(np.rot90(resized))
 
         if SHOW_CAMERA_BG and cam_surface is not None:
             screen.blit(cam_surface, (0, 0))
 
-        # Pass state_snapshot to all widgets — zero lock acquisitions in draw calls
+        _t_camera = time.perf_counter()
+
+        # Pass state_snapshot to all widgets
         overlay.draw(screen, state_snapshot)
         spirit_group.draw(screen)
         health_bar.draw(screen, state_snapshot)
         mission_tracker.draw(screen, state_snapshot)
         carbon_widget.draw(screen, state_snapshot)
 
+        _t_widgets = time.perf_counter()
+
         pygame.display.flip()
+
+        _t_flip = time.perf_counter()
+
+        # --- Instrumentation logging (Change A) ---
+        _frame_num += 1
+        if _perf_enabled and _perf_file and _frame_num % 60 == 0:
+            _fps = clock.get_fps()
+            _perf_file.write(
+                f"{_frame_num},"
+                f"{_t_event - _t0:.6f},{_t_snapshot - _t_event:.6f},"
+                f"{_t_update - _t_snapshot:.6f},{_t_fill - _t_update:.6f},"
+                f"{_t_camera - _t_fill:.6f},{_t_widgets - _t_camera:.6f},"
+                f"{_t_flip - _t_widgets:.6f},{_t_flip - _t0:.6f},{_fps:.1f}\n"
+            )
+            _perf_file.flush()
+
+        # --- FPS console print (Change J) ---
+        _now = time.time()
+        if _now >= _next_fps_print:
+            _next_fps_print = _now + 2.0
+            print(f"[Perf] FPS: {clock.get_fps():.1f}  frame: {(_t_flip - _t0) * 1000:.1f}ms"
+                  f"  update: {(_t_update - _t_snapshot) * 1000:.1f}ms"
+                  f"  flip: {(_t_flip - _t_widgets) * 1000:.1f}ms")
 
     print("[Main] Shutting down...")
     with state_lock:
         shared_state["app_quit"] = True
+
+    if _perf_file:
+        _perf_file.close()
 
     camera.stop()
     pygame.quit()

@@ -2,7 +2,9 @@ import pygame
 import math
 import random
 import time
-from typing import List, Tuple
+import os
+import array
+from typing import List
 
 # --- Global Configuration ---
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
@@ -12,6 +14,19 @@ BLACK = (0, 0, 0)
 TWO_PI = 2 * math.pi
 TAU = math.tau
 PI_HALF = math.pi / 2
+
+# --- Trig lookup table (Change G) ---
+# 360-entry sin/cos tables; ~1-degree resolution, avoids CPython math.sin/cos overhead
+_TRIG_N = 360
+_TRIG_SCALE = _TRIG_N / TWO_PI
+_SIN_TABLE = array.array('f', [math.sin(i * TWO_PI / _TRIG_N) for i in range(_TRIG_N)])
+_COS_TABLE = array.array('f', [math.cos(i * TWO_PI / _TRIG_N) for i in range(_TRIG_N)])
+
+def _fast_sin(angle):
+    return _SIN_TABLE[int((angle % TWO_PI) * _TRIG_SCALE) % _TRIG_N]
+
+def _fast_cos(angle):
+    return _COS_TABLE[int((angle % TWO_PI) * _TRIG_SCALE) % _TRIG_N]
 
 
 # =========================
@@ -109,9 +124,9 @@ class OrbitParticle:
         self.life = life
         self.color = color
 
-    def update(self):
-        self.angle += self.ang_speed
-        self.life -= 0.015
+    def update(self, dt60=1.0):
+        self.angle += self.ang_speed * dt60
+        self.life -= 0.015 * dt60
 
 
 class Particle:
@@ -127,22 +142,24 @@ class Particle:
         self.vel_x = random.uniform(-1.5, 1.5)
         self.vel_y = random.uniform(-1.5, 1.5)
 
-    def update(self):
-        self.x += self.vel_x
-        self.y += self.vel_y
-        self.life -= self.decay
+    def update(self, dt60=1.0):
+        self.x += self.vel_x * dt60
+        self.y += self.vel_y * dt60
+        self.life -= self.decay * dt60
 
 
 class SpiritCompanion(pygame.sprite.Sprite):
     # Class-level cache for wing surfaces (shared across instances if needed)
     _wing_cache_global = {}
-    _star_points_cache = {}  # left in place, but star drawing removed below
+    _star_points_cache = {}
     # Rotation cache: (w, h, color_q, alpha, angle_q) -> rotated Surface
     _rotated_cache = {}
     _ROTATED_CACHE_MAX = 256
 
     def __init__(self, shared_state, state_lock):
         super().__init__()
+        # Half-res rendering (Change D): draw to 200x200, scale up to 400x400
+        self._render_surf = pygame.Surface((200, 200), pygame.SRCALPHA)
         self.image = pygame.Surface((400, 400), pygame.SRCALPHA)
         self.rect = self.image.get_rect(center=(SCREEN_WIDTH // 4, SCREEN_HEIGHT // 2))
 
@@ -171,15 +188,12 @@ class SpiritCompanion(pygame.sprite.Sprite):
         # Angry shake (deterministic + smooth amplitude)
         self._angry_amp = 0.0
 
-
-        # Jitter frequency controls (tune these to adjust how fast angry shakes)
+        # Jitter frequency controls
         self.angry_jitter_rate_x = 19.0
         self.angry_jitter_rate_y = 23.0
 
-        # How long calm stays after pristine (seconds). Increase to make the green calm linger longer.
+        # How long calm stays after pristine (seconds)
         self.post_pristine_calm_seconds = 2.0
-
-        # After pristine finishes, hold calm for a short cooldown so it never snaps back to angry immediately
         self._post_pristine_cooldown_until = 0.0
 
         self.current_color = pygame.Vector3(80, 255, 150)
@@ -193,19 +207,16 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.celebration_progress = 0.0
         self.circle_center = self.home_pos.copy()
 
-        # Transition vars (these must exist)
+        # Transition vars
         self.transitioning_to_pristine = False
         self.transition_start_pos = self.pos.copy()
         self.transition_progress = 0.0
 
-        # Track last carbon-savings event we've reacted to (prevents resetting circle every frame)
         self._last_seen_savings_event_time = 0.0
-        # Fallback: track last event text if timestamps aren't provided
         self._last_seen_savings_event_text = ""
 
-        # Pristine celebration sequence state (transition in -> circle -> return home)
         self._pristine_active = False
-        self._pristine_phase = "idle"  # "in", "circle", "return", "idle"
+        self._pristine_phase = "idle"
         self._return_progress = 0.0
 
         # Target colors
@@ -213,12 +224,16 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.color_angry = pygame.Vector3(255, 40, 40)
         self.color_pristine = pygame.Vector3(180, 255, 200)
 
-        # Core rings
-        self.core_base_radii = [10 + (i * 9) for i in range(6, 0, -1)]
+        # Core rings at half-res (Change D)
+        self.core_base_radii = [int((10 + (i * 9)) * 0.5) for i in range(6, 0, -1)]
         self.core_alphas = [170 // i for i in range(6, 0, -1)]
 
-        # Center position relative to sprite surface
-        self.center = (self.image.get_width() // 2, self.image.get_height() // 2)
+        # Center position for the half-res render surface
+        self.center = (100, 100)
+
+        # Performance tuning from env vars (Changes H, I, F)
+        self._max_particles = int(os.getenv("ALETHEIA_MAX_PARTICLES", "40"))
+        self._wings_enabled = os.getenv("ALETHEIA_LITE_MODE", "0") != "1"
 
     def _get_star_points(self, radius, num_points, inner_ratio, angle_offset=0):
         """Left in place for compatibility (not used once star removed)."""
@@ -242,7 +257,8 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
         if cache_key not in SpiritCompanion._wing_cache_global:
             wing_layers = []
-            for i in range(5, 0, -1):
+            # Change B: reduced from 5 to 3 layers (cuts BLEND_ADD blits from 20 to 12)
+            for i in range(3, 0, -1):
                 w, h = width + (i * 12), height + (i * 6)
                 wing_surf = pygame.Surface((w * 2, h * 2), pygame.SRCALPHA)
                 wing_layers.append((wing_surf, w, h, 50 // i))
@@ -250,7 +266,7 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
         wing_layers = SpiritCompanion._wing_cache_global[cache_key]
 
-        rot_angle = angle_offset + (math.sin(self.wing_angle) * 15)
+        rot_angle = angle_offset + (_fast_sin(self.wing_angle) * 15)
         if not is_left:
             rot_angle = -rot_angle
 
@@ -271,15 +287,19 @@ class SpiritCompanion(pygame.sprite.Sprite):
                         del SpiritCompanion._rotated_cache[k]
             surf.blit(rotated, rotated.get_rect(center=center), special_flags=pygame.BLEND_ADD)
 
-    def update(self, state_snapshot=None):
-        self.image.fill((0, 0, 0, 0))
+    def update(self, state_snapshot=None, dt=None):
+        # dt is delta-time in seconds; default to 1/60 if not provided (backward compat)
+        if dt is None:
+            dt60 = 1.0
+        else:
+            dt60 = min(dt * 60.0, 3.0)  # normalize to 60fps equivalent, clamp to prevent huge jumps
+
+        # Clear the half-res render surface (Change D)
+        self._render_surf.fill((0, 0, 0, 0))
         now = pygame.time.get_ticks() * 0.001
         epoch_now = time.time()
 
         # --- State determination (STRICT ORDER) ---
-        # Desired order:
-        #   calm (default) -> angry (when waste detected) -> pristine (only on quest complete)
-        #   pristine ALWAYS returns to calm (never directly to angry)
         if state_snapshot is not None:
             carbon_saved_event_time = float(state_snapshot.get("last_savings_event_time", 0.0))
             carbon_saved_event_text = str(state_snapshot.get("last_savings_event", ""))
@@ -292,10 +312,8 @@ class SpiritCompanion(pygame.sprite.Sprite):
                 energy_waste_count = int(self.shared_state.get("energy_waste_count", 0))
                 detections = self.shared_state.get("detected_objects", [])
 
-        # Waste detected signal (future-proof):
         waste_present = energy_waste_count > 0 or any(d.get("carbon_impact") == "high" for d in detections)
 
-        # Detect a NEW quest completion / savings event (timestamp preferred; text fallback)
         quest_complete = False
         if carbon_saved_event_time > 0.0:
             quest_complete = carbon_saved_event_time > self._last_seen_savings_event_time
@@ -310,38 +328,27 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
         # --- STRICT FSM transitions ---
         if self.fsm_state == "calm":
-            # calm can ONLY go to angry (but never immediately after pristine)
             if waste_present and epoch_now >= self._post_pristine_cooldown_until:
                 self.fsm_state = "angry"
-
         elif self.fsm_state == "angry":
-            # angry can ONLY go to pristine
             if quest_complete:
-                # Start pristine celebration exactly once per quest completion
                 self._pristine_active = True
                 self._pristine_phase = "in"
                 self.celebration_progress = 0.0
                 self.circle_center = self.home_pos.copy()
-
                 self.transitioning_to_pristine = True
                 self.transition_progress = 0.0
                 self.transition_start_pos = self.pos.copy()
-
                 self.fsm_state = "pristine"
-
         elif self.fsm_state == "pristine":
-            # locked until pristine sequence finishes (movement section will set _pristine_active False)
             if not self._pristine_active:
-                # pristine ALWAYS returns to calm, never directly to angry
                 self.fsm_state = "calm"
-                # hold calm briefly so it doesn't snap back to angry in the same moment
                 self._post_pristine_cooldown_until = epoch_now + self.post_pristine_calm_seconds
 
-        # Map FSM to render state
         self.current_state = self.fsm_state
 
-        # --- Smooth color transition ---
-        lerp_speed = 0.05
+        # --- Smooth color transition (dt-normalized) ---
+        lerp_speed = 0.05 * dt60
         if self.current_state == "calm":
             target = self.color_calm
         elif self.current_state == "angry":
@@ -354,40 +361,35 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.current_color.z += (target.z - self.current_color.z) * lerp_speed
         color = (int(self.current_color.x), int(self.current_color.y), int(self.current_color.z))
 
-        # --- Wing speed, breath & movement ---
-        draw_wings = True  # ensure defined for all states
+        # --- Wing speed, breath & movement (dt-normalized, Change C) ---
+        draw_wings = True
 
         if self.current_state == "calm":
-            wing_speed = 0.18
-            breath = 1.0 + math.sin(now * TAU * 1.6) * 0.045
-
+            wing_speed = 0.18 * dt60
+            breath = 1.0 + _fast_sin(now * TAU * 1.6) * 0.045
         elif self.current_state == "angry":
-            wing_speed = 1.2
+            wing_speed = 1.2 * dt60
             breath = 1.0
-
         else:  # pristine
-            wing_speed = 0.08
-            breath = 1.0 + math.sin(now * TAU * 1.2) * 0.06
+            wing_speed = 0.08 * dt60
+            breath = 1.0 + _fast_sin(now * TAU * 1.2) * 0.06
 
         self.wing_angle += wing_speed
-        self.hover_angle += 0.08
+        self.hover_angle += 0.08 * dt60
 
-        # --- Movement ---
+        # --- Movement (dt-normalized) ---
         if self.current_state == "angry":
-            # Deterministic, strong shake with smooth amplitude (consistent feel)
             target_amp = 22.0
-            self._angry_amp += (target_amp - self._angry_amp) * 0.10
-            self.pos.x = self.home_pos.x + math.sin(now * self.angry_jitter_rate_x) * self._angry_amp
-            self.pos.y = self.home_pos.y + math.cos(now * self.angry_jitter_rate_y) * self._angry_amp
+            self._angry_amp += (target_amp - self._angry_amp) * 0.10 * dt60
+            self.pos.x = self.home_pos.x + _fast_sin(now * self.angry_jitter_rate_x) * self._angry_amp
+            self.pos.y = self.home_pos.y + _fast_cos(now * self.angry_jitter_rate_y) * self._angry_amp
 
         elif self.current_state == "pristine":
-            # Celebration: transition to circle, do ONE full loop, then return home.
             circle_radius = 80
-            circle_speed = 0.018  # ~1 loop in ~0.9s at 60fps
+            circle_speed = 0.018 * dt60
 
             if self._pristine_phase == "in":
-                # Lerp into the circle start point (right side of the circle)
-                self.transition_progress += 0.02
+                self.transition_progress += 0.02 * dt60
                 if self.transition_progress >= 1.0:
                     self.transition_progress = 1.0
                     self.transitioning_to_pristine = False
@@ -400,7 +402,6 @@ class SpiritCompanion(pygame.sprite.Sprite):
                 self.pos.y = self.transition_start_pos.y + (target_y - self.transition_start_pos.y) * t
 
             elif self._pristine_phase == "circle":
-                # Circle once; when completed, begin returning home
                 self.celebration_progress += circle_speed
                 if self.celebration_progress >= 1.0:
                     self.celebration_progress = 1.0
@@ -409,16 +410,15 @@ class SpiritCompanion(pygame.sprite.Sprite):
                     self._return_start_pos = self.pos.copy()
 
                 angle = self.celebration_progress * TWO_PI
-                self.pos.x = self.circle_center.x + math.cos(angle) * circle_radius
-                self.pos.y = self.circle_center.y + math.sin(angle) * circle_radius
+                self.pos.x = self.circle_center.x + _fast_cos(angle) * circle_radius
+                self.pos.y = self.circle_center.y + _fast_sin(angle) * circle_radius
 
             elif self._pristine_phase == "return":
-                # Lerp from current position back to home
-                self._return_progress += 0.03
+                self._return_progress += 0.03 * dt60
                 if self._return_progress >= 1.0:
                     self._return_progress = 1.0
                     self._pristine_phase = "idle"
-                    self._pristine_active = False  # celebration complete
+                    self._pristine_active = False
 
                 t = self._return_progress
                 start = getattr(self, "_return_start_pos", self.pos)
@@ -426,67 +426,67 @@ class SpiritCompanion(pygame.sprite.Sprite):
                 self.pos.y = start.y + (self.home_pos.y - start.y) * t
 
             else:
-                # Safety fallback: end pristine if phase is unknown
                 self._pristine_active = False
                 self._pristine_phase = "idle"
 
         else:  # calm
-            # Non-circular calm wander: pick a waypoint occasionally and ease toward it
             if epoch_now >= self._next_waypoint_epoch:
                 self._next_waypoint_epoch = epoch_now + random.uniform(2.0, 4.0)
                 self._calm_waypoint = self.home_pos + pygame.Vector2(
                     random.uniform(-45, 45),
                     random.uniform(-30, 30),
                 )
-            self.pos.x += (self._calm_waypoint.x - self.pos.x) * 0.03
-            self.pos.y += (self._calm_waypoint.y - self.pos.y) * 0.03
+            self.pos.x += (self._calm_waypoint.x - self.pos.x) * 0.03 * dt60
+            self.pos.y += (self._calm_waypoint.y - self.pos.y) * 0.03 * dt60
 
         self.rect.center = (int(self.pos.x), int(self.pos.y))
 
-        # --- Orbit particles ---
+        # --- Orbit particles (Change F: capped at _max_particles) ---
         if self.current_state in ("calm", "pristine"):
             time_since_spawn = now - self._last_orbit_spawn
-            if time_since_spawn > 0.06 and len(self.orbit_particles) < 100:
+            if time_since_spawn > 0.06 and len(self.orbit_particles) < self._max_particles:
                 self._last_orbit_spawn = now
                 for _ in range(2):
                     self.orbit_particles.append(OrbitParticle(
                         random.uniform(0, TAU),
-                        random.uniform(40, 120),
+                        random.uniform(20, 60),   # half-res radii (Change D)
                         random.uniform(0.02, 0.06) * random.choice((-1, 1)),
-                        random.randint(2, 5),
+                        random.randint(1, 3),      # half-res sizes (Change D)
                         1.0,
                         color
                     ))
 
         for p in self.orbit_particles:
-            p.update()
+            p.update(dt60)
         self.orbit_particles = [p for p in self.orbit_particles if p.life > 0]
 
-        # --- Drawing ---
-        center_x, center_y = self.center
+        # --- Drawing onto half-res _render_surf (Change D) ---
+        center_x, center_y = self.center  # (100, 100)
         draw_circle = pygame.draw.circle
+        rs = self._render_surf
 
-        # Draw orbit particles
+        # Draw orbit particles (Change G: trig lookup)
         for p in self.orbit_particles:
-            ox = int(center_x + math.cos(p.angle) * (p.radius * breath))
-            oy = int(center_y + math.sin(p.angle) * (p.radius * breath))
+            ox = int(center_x + _fast_cos(p.angle) * (p.radius * breath))
+            oy = int(center_y + _fast_sin(p.angle) * (p.radius * breath))
             alpha = int(180 * min(1.0, max(0.0, p.life)))
-            draw_circle(self.image, (*p.color, alpha), (ox, oy), p.size)
+            draw_circle(rs, (*p.color, alpha), (ox, oy), p.size)
 
-        if draw_wings:
-            self.draw_ethereal_wing(self.image, (center_x - 60, center_y - 30), 30, 120, 35, color, True)
-            self.draw_ethereal_wing(self.image, (center_x + 60, center_y - 30), 30, 120, 35, color, False)
-            self.draw_ethereal_wing(self.image, (center_x - 50, center_y + 10), -20, 90, 25, color, True)
-            self.draw_ethereal_wing(self.image, (center_x + 50, center_y + 10), -20, 90, 25, color, False)
+        # Wings (Change I: lite mode can disable; Change D: halved coords)
+        if draw_wings and self._wings_enabled:
+            self.draw_ethereal_wing(rs, (center_x - 30, center_y - 15), 30, 60, 18, color, True)
+            self.draw_ethereal_wing(rs, (center_x + 30, center_y - 15), 30, 60, 18, color, False)
+            self.draw_ethereal_wing(rs, (center_x - 25, center_y + 5), -20, 45, 13, color, True)
+            self.draw_ethereal_wing(rs, (center_x + 25, center_y + 5), -20, 45, 13, color, False)
 
-        # ✅ STAR REMOVED: Draw core for ALL states (including angry)
+        # Core rings (Change D: halved radii pre-computed in __init__)
         for base_r, alpha in zip(self.core_base_radii, self.core_alphas):
             r = int(base_r * breath)
-            draw_circle(self.image, (*color, alpha), self.center, r)
-        draw_circle(self.image, (255, 255, 255), self.center, int(14 * breath))
+            draw_circle(rs, (*color, alpha), self.center, r)
+        draw_circle(rs, (255, 255, 255), self.center, int(7 * breath))
 
-
-
+        # Scale half-res render up to full sprite image (Change D)
+        pygame.transform.smoothscale(self._render_surf, (400, 400), self.image)
 
 
 class DetectionOverlay:
