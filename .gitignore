@@ -22,8 +22,6 @@ pip-wheel-metadata/
 # ExecuTorch / Model Files
 # =========================
 # Large model binaries (don’t commit these)
-*.pte
-*.pt
 *.onnx
 *.engine
 
