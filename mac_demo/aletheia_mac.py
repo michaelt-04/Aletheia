@@ -69,6 +69,9 @@ HAND_TARGET_HZ = 30.0
 # (320x180 on Pi amplifies 1px error to 4px on screen; 640x360 halves that)
 HAND_DETECT_W, HAND_DETECT_H = 640, 360
 
+# Camera background: ALETHEIA_SHOW_CAMERA=1 python mac_demo/aletheia_mac.py
+SHOW_CAMERA_BG = os.getenv("ALETHEIA_SHOW_CAMERA", "0") == "1"
+
 # --- Shared State ---
 
 shared_state = {
@@ -95,8 +98,12 @@ def main():
 
     pygame.init()
     print(f"[Mac Demo] SDL video driver: {pygame.display.get_driver()}")
+    print(f"[Mac Demo] Camera background: {'ON' if SHOW_CAMERA_BG else 'OFF'} "
+          f"(use ALETHEIA_SHOW_CAMERA=1 to toggle)")
 
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.NOFRAME)
+    SCREEN_WIDTH, SCREEN_HEIGHT = screen.get_size()
+    print(f"[Mac Demo] Display resolution: {SCREEN_WIDTH}x{SCREEN_HEIGHT}")
     pygame.display.set_caption("Aletheia Mac Demo")
     clock = pygame.time.Clock()
 
@@ -254,7 +261,7 @@ def main():
         # Draw
         screen.fill((0, 0, 0))
 
-        # Camera background (always on for demo)
+        # Camera background (toggle with ALETHEIA_SHOW_CAMERA=1)
         # np.rot90 inherently flips horizontally (transpose + flip), giving us
         # the selfie-mirror effect that matches the mirrored frame workers see.
         # Do NOT add cv2.flip here — it would cancel the rot90 mirror.
@@ -270,7 +277,7 @@ def main():
                 else:
                     pygame.surfarray.blit_array(cam_surface, arr)
 
-        if cam_surface is not None:
+        if SHOW_CAMERA_BG and cam_surface is not None:
             screen.blit(cam_surface, (0, 0))
 
         # Widgets
