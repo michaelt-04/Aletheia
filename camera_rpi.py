@@ -28,7 +28,8 @@ except Exception as e:
 if IS_RPI:
     print("[CameraManager] Attempting to import 'picamera2'...")
     try:
-        from picamera2 import Picamera2
+        from picamera2 import Picamera2, Preview
+        from libcamera import controls
         print("[CameraManager] Successfully imported 'picamera2'.")
     except ImportError as e:
         print(f"[CameraManager] FAILED to import 'picamera2'. The library might not be installed correctly.")
@@ -42,13 +43,21 @@ if IS_RPI:
 
 class RPiCamera:
     """A thread-safe camera manager for the Raspberry Pi camera module."""
-    def __init__(self, width=1280, height=720):
+    def __init__(self, width=640, height=480):
         print(f"[RPiCamera] Initializing camera with resolution {width}x{height}...")
         self.picam2 = Picamera2()
-        self.config = self.picam2.create_preview_configuration(
+        
+        # Configure Camera Module 3 specifics
+        config = self.picam2.create_preview_configuration(
             main={"size": (width, height), "format": "RGB888"}
         )
-        self.picam2.configure(self.config)
+        self.picam2.configure(config)
+        
+        # Set controls for autofocus and AWB
+        self.picam2.set_controls({
+            "AfMode": controls.AfMode.Continuous,
+            "AwbMode": controls.AwbMode.Greyworld
+        })
         
         self.frame = None
         self.lock = threading.Lock()
