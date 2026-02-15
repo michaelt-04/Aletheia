@@ -19,7 +19,7 @@ ENABLE_HANDS = os.getenv("ALETHEIA_ENABLE_HANDS", "1") == "1"
 from camera_rpi import get_camera_manager
 
 # GUI Components
-from aletheia_gui import SpiritCompanion, GreyFog, DetectionOverlay, HealthBar, MissionTracker, CarbonSavingsWidget
+from aletheia_gui import SpiritCompanion, DetectionOverlay, HealthBar, MissionTracker, CarbonSavingsWidget
 
 # Vision libraries
 import cv2
@@ -266,12 +266,13 @@ def main():
     clock = pygame.time.Clock()
 
     # Init GUI Components
+    # Init GUI Components (stateful widgets)
     spirit = SpiritCompanion(shared_state, state_lock)
-    grey_fog = GreyFog()
-    overlay = DetectionOverlay()
-    health_bar = HealthBar()
-    mission_tracker = MissionTracker()
-    carbon_widget = CarbonSavingsWidget()
+    overlay = DetectionOverlay(shared_state, state_lock)
+    health_bar = HealthBar(shared_state, state_lock)
+    mission_tracker = MissionTracker(shared_state, state_lock)
+    carbon_widget = CarbonSavingsWidget(shared_state, state_lock)
+
 
     print("[Main] Initializing Camera...")
     camera = get_camera_manager()
@@ -319,7 +320,7 @@ def main():
 
         # Update UI logic
         spirit.update(dt, cursor, is_pinching)
-        grey_fog.update(dt)
+
         overlay.update(detections)
         health_bar.update(shared_state.get("health", 100))
         mission_tracker.update(shared_state.get("mission", "Explore"))
@@ -338,7 +339,7 @@ def main():
             screen.blit(surf, (0, 0))
 
         overlay.draw(screen)
-        grey_fog.draw(screen)
+
         spirit.draw(screen)
         health_bar.draw(screen)
         mission_tracker.draw(screen)

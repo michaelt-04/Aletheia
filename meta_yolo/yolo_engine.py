@@ -209,7 +209,7 @@ class YOLODetector:
     def compute_carbon_velocity(detections):
         """
         Compute a carbon velocity score (0.0 - 1.0) from detections.
-        Used to drive the EcoSprite and GreyFog in the Aletheia HUD.
+        Used to drive the EcoSprite in the Aletheia HUD.
         """
         if not detections:
             return 0.0

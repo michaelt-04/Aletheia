@@ -445,25 +445,7 @@ class SpiritCompanion(pygame.sprite.Sprite):
         draw_circle(self.image, (255, 255, 255), self.center, int(14 * breath))
 
 
-class GreyFog:
-    """Optimized fog overlay."""
-    __slots__ = ('surface', 'current_alpha', 'shared_state', 'state_lock')
 
-    def __init__(self, shared_state, state_lock):
-        self.surface = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-        self.current_alpha = 0.0
-        self.shared_state = shared_state
-        self.state_lock = state_lock
-
-    def draw(self, screen):
-        with self.state_lock:
-            carbon_v = self.shared_state["carbon_velocity"]
-
-        target_alpha = carbon_v * 200
-        self.current_alpha += (target_alpha - self.current_alpha) * 0.05
-
-        self.surface.fill((50, 50, 55, int(self.current_alpha)))
-        screen.blit(self.surface, (0, 0))
 
 
 class DetectionOverlay:
