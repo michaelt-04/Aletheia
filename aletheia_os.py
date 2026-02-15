@@ -51,12 +51,24 @@ YOLO_MODEL_PATH = os.path.join(
 shared_state = {
     "is_pinching": False,
     "index_finger_tip": (0, 0),
-    "detections": [],
+
+    # GUI expects this name (not "detections")
+    "detected_objects": [],
+
+    # SpiritCompanion reads these
+    "energy_waste_count": 0,
+    "last_savings_event": "",
+    "last_savings_event_time": 0.0,
+
+    # Other HUD widgets read these
     "health": 100,
-    "mission": "Explore",
-    "carbon_saved": 0.0,
+    "missions_completed": 0,
+    "missions_total": 5,
+    "carbon_saved_g": 0.0,
+
     "app_quit": False,
 }
+
 
 state_lock = threading.Lock()
 
@@ -121,7 +133,7 @@ class YoloDetectionThread(threading.Thread):
                 detections = []
 
             with self.state_lock:
-                self.shared_state["detections"] = detections
+                self.shared_state["detected_objects"] = detections
 
         print("[YoloDetectionThread] Stopped.")
 
@@ -274,6 +286,7 @@ def main():
     carbon_widget = CarbonSavingsWidget(shared_state, state_lock)
 
 
+
     print("[Main] Initializing Camera...")
     camera = get_camera_manager()
     camera.start()
@@ -314,17 +327,14 @@ def main():
 
         # Read shared state
         with state_lock:
-            detections = shared_state.get("detections", [])
+            detections = shared_state.get("detected_objects", [])
             cursor = shared_state.get("index_finger_tip", (0, 0))
             is_pinching = shared_state.get("is_pinching", False)
 
         # Update UI logic
         spirit.update()
 
-        overlay.update()
-        health_bar.update()
-        mission_tracker.update()
-        carbon_widget.update()
+    
 
 
         # Draw everything
