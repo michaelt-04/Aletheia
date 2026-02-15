@@ -1,4 +1,4 @@
-# aletheia_gui.py
+# aletheia_gui.py - Full Version with Responsive Questing
 import pygame
 import math
 import random
@@ -97,6 +97,7 @@ class QuestManager:
 
         # --- IDLE: Show Red Fog on High Impact Items ---
         if self.quest_state == "IDLE":
+            hovering = False
             for det in detections:
                 impact = det.get("carbon_impact", "low")
                 if impact == "high":
@@ -111,10 +112,18 @@ class QuestManager:
                     
                     self._draw_fog(screen, cx, cy, dt)
                     
-                    # Hit Test (Increased radius to 100 for easier clicking)
-                    if clicked and math.hypot(cursor[0]-cx, cursor[1]-cy) < 100:
-                        self.active_target = det
-                        self.quest_state = "OFFER"
+                    # Hit Test (Increased radius + Hover logic)
+                    dist = math.hypot(cursor[0]-cx, cursor[1]-cy)
+                    if dist < 120:
+                        hovering = True
+                        # Responsive Trigger: If pinching while hovering, activate!
+                        if is_pinching:
+                            self.active_target = det
+                            self.quest_state = "OFFER"
+                            self.was_pinching = True # Prevent double-click
+
+            # Draw Cursor with Hover Feedback
+            self._draw_cursor(screen, cursor, is_pinching, hovering)
 
         # --- OFFER: Accept or Reject ---
         elif self.quest_state == "OFFER":
@@ -134,6 +143,8 @@ class QuestManager:
                     self.active_target = None
             else:
                 self.quest_state = "IDLE"
+            
+            self._draw_cursor(screen, cursor, is_pinching, False)
 
         # --- ACTIVE: Timer ---
         elif self.quest_state == "ACTIVE":
@@ -153,14 +164,26 @@ class QuestManager:
             elif res == "Cancel":
                 self.quest_state = "IDLE"
                 self.active_target = None
-
-        # Draw Cursor (Visual Feedback)
-        cx, cy = cursor
-        color = (50, 255, 100) if is_pinching else (200, 200, 200)
-        pygame.draw.circle(screen, color, (cx, cy), 8 if is_pinching else 5)
-        pygame.draw.circle(screen, (0, 0, 0), (cx, cy), 10 if is_pinching else 6, 1)
+            
+            self._draw_cursor(screen, cursor, is_pinching, False)
 
         self.was_pinching = is_pinching
+
+    def _draw_cursor(self, screen, cursor, is_pinching, hovering):
+        cx, cy = cursor
+        if hovering:
+            # Yellow + Large to indicate "Ready to Pinch"
+            color = (255, 255, 0)
+            radius = 12 if is_pinching else 10
+            # Extra ring
+            pygame.draw.circle(screen, (255, 255, 255), (cx, cy), radius + 4, 2)
+        else:
+            # Green/Grey Normal
+            color = (50, 255, 100) if is_pinching else (200, 200, 200)
+            radius = 8 if is_pinching else 5
+            
+        pygame.draw.circle(screen, color, (cx, cy), radius)
+        pygame.draw.circle(screen, (0, 0, 0), (cx, cy), radius + 2, 1)
 
     def _draw_fog(self, screen, x, y, dt):
         t = time.time() * 5.0
@@ -315,6 +338,7 @@ class CarbonSavingsWidget:
 
 class OrbitParticle:
     __slots__ = ('angle', 'radius', 'ang_speed', 'size', 'life', 'color')
+    
     def __init__(self, angle, radius, ang_speed, size, life, color):
         self.angle = angle
         self.radius = radius
@@ -329,6 +353,7 @@ class OrbitParticle:
 
 class Particle:
     __slots__ = ('x', 'y', 'color', 'size', 'life', 'decay', 'vel_x', 'vel_y')
+    
     def __init__(self, x, y, color):
         self.x, self.y = float(x), float(y)
         self.color = color
@@ -359,6 +384,7 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.shared_state = shared_state
         self.state_lock = state_lock
 
+        # Dynamic positioning logic
         try:
             info = pygame.display.Info()
             sw, sh = info.current_w, info.current_h
