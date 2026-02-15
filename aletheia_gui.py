@@ -8,8 +8,8 @@ import array
 from typing import List
 
 # --- Global Configuration ---
-# Default fallback resolution
-SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
+# Default fallback resolution (used for scaling calculations)
+CAMERA_WIDTH, CAMERA_HEIGHT = 1280, 720
 BLACK = (0, 0, 0)
 
 # Pre-calculate common math constants
@@ -57,7 +57,6 @@ class QuestManager:
         self.font_timer = pygame.font.Font(None, 48)
 
         # --- OPTIMIZED RED FOG ---
-        # Pre-render a fuzzy red circle
         self.fog_sprite = pygame.Surface((60, 60), pygame.SRCALPHA)
         for r in range(30, 0, -5):
             alpha = 5 + (30 - r) * 2
@@ -78,6 +77,7 @@ class QuestManager:
         }
 
     def _is_clicked(self, cursor, is_pinching):
+        # Rising edge detection (Click)
         clicked = is_pinching and not self.was_pinching
         return clicked
 
@@ -88,20 +88,31 @@ class QuestManager:
         
         clicked = self._is_clicked(cursor, is_pinching)
         current_time = time.time()
+        
+        # --- COORDINATE SCALING ---
+        # Map 1280x720 detections to Actual Screen Size (e.g. 1920x1080)
+        sw, sh = screen.get_size()
+        scale_x = sw / CAMERA_WIDTH
+        scale_y = sh / CAMERA_HEIGHT
 
         # --- IDLE: Show Red Fog on High Impact Items ---
         if self.quest_state == "IDLE":
             for det in detections:
                 impact = det.get("carbon_impact", "low")
                 if impact == "high":
+                    # Get raw box center
                     box = det.get("box", (0, 0, 0, 0))
-                    cx = (box[0] + box[2]) // 2
-                    cy = (box[1] + box[3]) // 2
+                    raw_cx = (box[0] + box[2]) // 2
+                    raw_cy = (box[1] + box[3]) // 2
+                    
+                    # Scale to screen coords
+                    cx = int(raw_cx * scale_x)
+                    cy = int(raw_cy * scale_y)
                     
                     self._draw_fog(screen, cx, cy, dt)
                     
-                    # Hit Test
-                    if clicked and math.hypot(cursor[0]-cx, cursor[1]-cy) < 80:
+                    # Hit Test (Increased radius to 100 for easier clicking)
+                    if clicked and math.hypot(cursor[0]-cx, cursor[1]-cy) < 100:
                         self.active_target = det
                         self.quest_state = "OFFER"
 
@@ -143,7 +154,7 @@ class QuestManager:
                 self.quest_state = "IDLE"
                 self.active_target = None
 
-        # Draw Cursor
+        # Draw Cursor (Visual Feedback)
         cx, cy = cursor
         color = (50, 255, 100) if is_pinching else (200, 200, 200)
         pygame.draw.circle(screen, color, (cx, cy), 8 if is_pinching else 5)
@@ -159,7 +170,6 @@ class QuestManager:
             screen.blit(self.fog_sprite, (x + offset_x - 30, y + offset_y - 30))
 
     def _draw_popup(self, screen, title, body, options, cursor, clicked, highlight_color=(100, 200, 255)):
-        # Dynamic Centering
         sw, sh = screen.get_size()
         w, h = 420, 260
         x = (sw - w) // 2
@@ -280,7 +290,6 @@ class CarbonSavingsWidget:
         self.displayed_value += (total_saved - self.displayed_value) * 0.08
         total_saved_kg = self.displayed_value / 1000.0
 
-        # Dynamic Positioning
         sw, sh = screen.get_size()
         x = sw - self.width - self.padding
         y = self.padding
@@ -350,16 +359,13 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.shared_state = shared_state
         self.state_lock = state_lock
 
-        # --- DYNAMIC HOME POSITION (Fixes Spirit Centering) ---
-        # Try to get actual screen size, fallback to 1280x720
         try:
             info = pygame.display.Info()
             sw, sh = info.current_w, info.current_h
-            if sw < 100: sw, sh = 1280, 720 # Sanity check
+            if sw < 100: sw, sh = 1280, 720
         except:
             sw, sh = 1280, 720
             
-        # Place Spirit 15% from left edge, centered vertically
         self.home_pos = pygame.Vector2(sw * 0.15, sh * 0.5)
         self.pos = self.home_pos.copy()
 
@@ -682,7 +688,6 @@ class HealthBar:
         else:
             with self.state_lock: hp = self.shared_state.get("health", 0)
         
-        # Dynamic Positioning (Bottom Right)
         sw, sh = screen.get_size()
         x = sw - self.width - 10
         y = sh - self.height - 10
@@ -728,7 +733,6 @@ class MissionTracker:
             self._cached_width = self._cached_text_surf.get_width() + 20
             self._cached_height = self._cached_text_surf.get_height() + 10
 
-        # Dynamic Positioning (Bottom Right, above HealthBar)
         sw, sh = screen.get_size()
         x = sw - self._cached_width - self.padding
         y = sh - 60 
