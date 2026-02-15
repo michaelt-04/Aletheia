@@ -7,57 +7,67 @@ from libcamera import controls
 
 # --- Setup MediaPipe ---
 mp_hands = mp.solutions.hands
+# We do NOT import mp_draw as we want a clean view without outlines
 hands = mp_hands.Hands(
     static_image_mode=False,
     max_num_hands=1,
     min_detection_confidence=0.7,
     min_tracking_confidence=0.5
 )
-mp_draw = mp.solutions.drawing_utils
 
 # --- Setup RPi Camera ---
 picam2 = Picamera2()
-# Configure for 640x480 for higher FPS on RPi
+# 640x480 is the sweet spot for MediaPipe performance on RPi
 config = picam2.create_preview_configuration(
     main={"size": (640, 480), "format": "RGB888"}
 )
 picam2.configure(config)
-# Enable Continuous Autofocus for Camera Module 3
+
+# Fix for Module 3: Enable Continuous Autofocus
 picam2.set_controls({"AfMode": controls.AfModeEnum.Continuous})
+
+# Fix for NoIR: Greyworld AWB helps compensate for IR-induced blue/purple tints
+picam2.set_controls({"AwbMode": controls.AwbModeEnum.Greyworld})
+
 picam2.start()
 
-print("Hand Tracking Test Started. Press 'q' in the window to quit.")
+print("Hand Tracking Test Started.")
+print("Controls: 'q' to quit | Result: No outlines, Corrected Colors")
 
 try:
     while True:
-        # 1. Capture frame directly as RGB for MediaPipe
+        # 1. Capture frame (RGB format)
         frame_rgb = picam2.capture_array()
         
-        # 2. Process with MediaPipe
+        # 2. Process with MediaPipe (Requires RGB)
         results = hands.process(frame_rgb)
         
-        # 3. Convert to BGR for OpenCV display
+        # 3. Fix "Blue Hand": Convert RGB to BGR for OpenCV display
         display_frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
         
         if results.multi_hand_landmarks:
             for hand_lms in results.multi_hand_landmarks:
-                # Draw the skeleton
-                mp_draw.draw_landmarks(display_frame, hand_lms, mp_hands.HAND_CONNECTIONS)
+                # We skipped mp_draw.draw_landmarks to remove the skeleton outline
                 
-                # Get specific coordinates for pinch detection
-                # Index 4 = Thumb Tip, Index 8 = Index Tip
-                thumb = hand_lms.landmark[4]
-                index = hand_lms.landmark[8]
+                # Pinch Detection Logic
+                thumb_tip = hand_lms.landmark[4]
+                index_tip = hand_lms.landmark[8]
                 
-                # Calculate distance (normalized 0.0 to 1.0)
-                dist = math.hypot(index.x - thumb.x, index.y - thumb.y)
+                # Calculate Euclidean distance
+                dist = math.hypot(index_tip.x - thumb_tip.x, index_tip.y - thumb_tip.y)
                 
-                if dist < 0.05: # Pinch threshold
-                    cv2.putText(display_frame, "PINCH!", (50, 50), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                    print("PINCH DETECTED!")
+                # If pinching, draw a single glowing indicator at the index tip
+                if dist < 0.05:
+                    ix = int(index_tip.x * 640)
+                    iy = int(index_tip.y * 480)
+                    
+                    # Draw a solid green circle to indicate the "Pinch" action
+                    cv2.circle(display_frame, (ix, iy), 15, (0, 255, 0), -1)
+                    # Add a small white core for an 'ethereal' look
+                    cv2.circle(display_frame, (ix, iy), 5, (255, 255, 255), -1)
 
-        cv2.imshow("Aletheia Hand Test", display_frame)
+        # Show the corrected frame
+        cv2.imshow("Aletheia Hand Diagnostic", display_frame)
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -65,4 +75,4 @@ try:
 finally:
     picam2.stop()
     cv2.destroyAllWindows()
-    print("Test Stopped.")
+    print("Test Stopped Cleanly.")
