@@ -1,19 +1,98 @@
-# Virtual environments
-venv*/
-ENV*/
-
-# Bytecode
+# =========================
+# Python
+# =========================
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.env/
+.venv/
 
 # Distribution / packaging
 build/
 dist/
 *.egg-info/
+*.egg
+pip-wheel-metadata/
 
-# IDE/editor files
+# =========================
+# ExecuTorch / Model Files
+# =========================
+# Large model binaries (don’t commit these)
+*.pte
+*.pt
+*.onnx
+*.engine
+
+# If you want to keep a specific model:
+# !models/yolo26n_xnnpack.pte
+
+# =========================
+# Logs & Debug
+# =========================
+*.log
+logs/
+debug/
+*.out
+
+# =========================
+# macOS
+# =========================
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# =========================
+# Raspberry Pi / Linux
+# =========================
+*.swp
+*.swo
+*~
+
+# =========================
+# IDE / Editors
+# =========================
 .vscode/
 .idea/
-*.swp
+*.iml
+
+# =========================
+# Testing Artifacts
+# =========================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# =========================
+# Temporary Files
+# =========================
+*.tmp
+*.temp
+*.bak
+
+# =========================
+# Zips / Exports
+# =========================
+*.zip
+*.tar
+*.gz
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.local
+.env.*
+
+# =========================
+# OS / System
+# =========================
+Thumbs.db
+desktop.ini
