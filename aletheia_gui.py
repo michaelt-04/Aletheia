@@ -13,6 +13,70 @@ TAU = math.tau
 PI_HALF = math.pi / 2
 
 
+# =========================
+# Carbon Tracker (NEW)
+# =========================
+class CarbonSavingsWidget:
+    """
+    HUD widget that shows total CO2e reduced and the last savings event.
+    Top-left, more transparent background, resolution-adaptive.
+    """
+    __slots__ = (
+        "shared_state", "state_lock",
+        "font_large", "font_small",
+        "padding", "width", "height",
+        "displayed_value", "panel_alpha"
+    )
+
+    def __init__(self, shared_state, state_lock, *, panel_alpha: int = 90):
+        self.shared_state = shared_state
+        self.state_lock = state_lock
+
+        self.font_large = pygame.font.Font(None, 42)
+        self.font_small = pygame.font.Font(None, 24)
+
+        self.padding = 20
+        self.width = 360
+        self.height = 120
+
+        self.displayed_value = 0.0  # smooth count-up
+        self.panel_alpha = panel_alpha
+
+    def draw(self, screen):
+        with self.state_lock:
+            total_saved = float(self.shared_state.get("carbon_saved_g", 0.0))
+            last_event = self.shared_state.get("last_savings_event", "")
+
+        # Smooth animated count-up
+        self.displayed_value += (total_saved - self.displayed_value) * 0.08
+        total_saved_kg = self.displayed_value / 1000.0
+
+        # Resolution-adaptive positioning
+        screen_w, _ = screen.get_size()
+        screen_width, _ = screen.get_size()
+        x = screen_width - self.width - self.padding
+
+        y = self.padding
+
+        # Background panel (more transparent)
+        panel = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        panel.fill((0, 0, 0, self.panel_alpha))
+        screen.blit(panel, (x, y))
+
+        # Title
+        title = self.font_small.render("Carbon Reduced", True, (120, 255, 160))
+        screen.blit(title, (x + 15, y + 10))
+
+        # Big number (use CO2e for glyph compatibility)
+        value = self.font_large.render(f"{total_saved_kg:.2f} kg CO2e", True, (255, 255, 255))
+        screen.blit(value, (x + 15, y + 40))
+
+        # Last event line
+        if last_event:
+            event_text = self.font_small.render(f"+ {last_event}", True, (180, 255, 200))
+            screen.blit(event_text, (x + 15, y + 85))
+
+
 class OrbitParticle:
     """Small circles that orbit around the spirit core and fade out."""
     __slots__ = ('angle', 'radius', 'ang_speed', 'size', 'life', 'color')
@@ -180,13 +244,12 @@ class SpiritCompanion(pygame.sprite.Sprite):
         else:
             target = self.color_pristine
         
-        # Direct vector lerp is faster
         self.current_color.x += (target.x - self.current_color.x) * lerp_speed
         self.current_color.y += (target.y - self.current_color.y) * lerp_speed
         self.current_color.z += (target.z - self.current_color.z) * lerp_speed
         color = (int(self.current_color.x), int(self.current_color.y), int(self.current_color.z))
 
-        # Wing speed & breath (avoid repeated dict lookups)
+        # Wing speed & breath
         if self.current_state == "calm":
             wing_speed = 0.18
             breath = 1.0 + math.sin(now * TAU * 1.6) * 0.045
@@ -202,7 +265,6 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
         # Movement
         if self.current_state == "angry":
-            # Use randint less frequently if possible, or cache jitter
             jitter_x = random.randint(-8, 8)
             jitter_y = random.randint(-8, 8)
             self.pos.x = self.home_pos.x + jitter_x
@@ -218,7 +280,6 @@ class SpiritCompanion(pygame.sprite.Sprite):
                     self.transition_progress = 1.0
                     self.transitioning_to_pristine = False
                     
-                # Manual lerp is faster than .lerp()
                 t = self.transition_progress
                 target_x = self.circle_center.x + circle_radius
                 target_y = self.circle_center.y
@@ -227,7 +288,6 @@ class SpiritCompanion(pygame.sprite.Sprite):
             else:
                 self.celebration_progress += circle_speed
                 angle = self.celebration_progress * TWO_PI
-                # Direct calculation instead of Vector2 addition
                 self.pos.x = self.circle_center.x + math.cos(angle) * circle_radius
                 self.pos.y = self.circle_center.y + math.sin(angle) * circle_radius
                 
@@ -241,12 +301,11 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
         self.rect.center = (int(self.pos.x), int(self.pos.y))
 
-        # Orbit particles (batch creation, reduced frequency check)
+        # Orbit particles
         if self.current_state in ("calm", "pristine"):
             time_since_spawn = now - self._last_orbit_spawn
             if time_since_spawn > 0.06 and len(self.orbit_particles) < 100:
                 self._last_orbit_spawn = now
-                # Create 2 at once to reduce overhead
                 for _ in range(2):
                     self.orbit_particles.append(OrbitParticle(
                         random.uniform(0, TAU),
@@ -257,14 +316,11 @@ class SpiritCompanion(pygame.sprite.Sprite):
                         color
                     ))
 
-        # Update particles in-place
         for p in self.orbit_particles:
             p.update()
-        
-        # Filter dead particles (list comprehension is faster than loop)
         self.orbit_particles = [p for p in self.orbit_particles if p.life > 0]
 
-        # Draw orbit particles (avoid tuple unpacking in loop)
+        # Draw orbit particles
         center_x, center_y = self.center
         cos_fn = math.cos
         sin_fn = math.sin
@@ -282,8 +338,8 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.draw_ethereal_wing(self.image, (250, 310), -20, 90, 25, color, True)
         self.draw_ethereal_wing(self.image, (350, 310), -20, 90, 25, color, False)
 
-        # Draw core (use pre-calculated values)
-        for i, (base_r, alpha) in enumerate(zip(self.core_base_radii, self.core_alphas)):
+        # Draw core
+        for base_r, alpha in zip(self.core_base_radii, self.core_alphas):
             r = int(base_r * breath)
             draw_circle(self.image, (*color, alpha), self.center, r)
         draw_circle(self.image, (255, 255, 255), self.center, int(14 * breath))
@@ -303,7 +359,7 @@ class GreyFog:
         with self.state_lock:
             carbon_v = self.shared_state["carbon_velocity"]
 
-        target_alpha = carbon_v * 200  # Avoid int() until final use
+        target_alpha = carbon_v * 200
         self.current_alpha += (target_alpha - self.current_alpha) * 0.05
 
         self.surface.fill((50, 50, 55, int(self.current_alpha)))
@@ -312,7 +368,8 @@ class GreyFog:
 
 class DetectionOverlay:
     """Optimized detection overlay."""
-    __slots__ = ('font', 'small_font', 'impact_colors', 'shared_state', 'state_lock', 'title_surface')
+    __slots__ = ('font', 'small_font', 'impact_colors', 'shared_state', 'state_lock', 'title_surface',
+                 'x0', 'y0')
     
     def __init__(self, shared_state, state_lock):
         self.font = pygame.font.Font(None, 28)
@@ -327,6 +384,10 @@ class DetectionOverlay:
         self.state_lock = state_lock
         self.title_surface = self.font.render("Detected Objects", True, (255, 255, 255))
 
+        # Move down so it doesn't overlap the CarbonSavingsWidget (top-left)
+        self.x0 = 20
+        self.y0 = 160
+
     def draw(self, screen):
         with self.state_lock:
             detections = self.shared_state["detected_objects"]
@@ -337,28 +398,28 @@ class DetectionOverlay:
         panel_h = min(len(detections), 8) * 30 + 50
         panel_surface = pygame.Surface((320, panel_h), pygame.SRCALPHA)
         panel_surface.fill((0, 0, 0, 140))
-        screen.blit(panel_surface, (20, 70))
-        screen.blit(self.title_surface, (30, 78))
+        screen.blit(panel_surface, (self.x0, self.y0))
+        screen.blit(self.title_surface, (self.x0 + 10, self.y0 + 8))
 
-        y = 108
+        y = self.y0 + 38
         white = (255, 255, 255)
         
         for det in detections[:8]:
             color = self.impact_colors.get(det.get("carbon_impact", "unknown"), (180, 180, 180))
-            pygame.draw.circle(screen, color, (40, y + 8), 5)
+            pygame.draw.circle(screen, color, (self.x0 + 20, y + 10), 5)
 
             label = det.get("label", "?")
             conf = float(det.get("confidence", 0.0))
             text_surf = self.small_font.render(f"{label} ({conf:.0%})", True, white)
-            screen.blit(text_surf, (52, y))
+            screen.blit(text_surf, (self.x0 + 32, y + 2))
 
             impact_surf = self.small_font.render(det.get("carbon_impact", "?"), True, color)
-            screen.blit(impact_surf, (260, y))
+            screen.blit(impact_surf, (self.x0 + 240, y + 2))
             y += 30
 
         if len(detections) > 8:
             more = self.small_font.render(f"+{len(detections) - 8} more...", True, (150, 150, 150))
-            screen.blit(more, (52, y))
+            screen.blit(more, (self.x0 + 32, y + 2))
 
 
 class HealthBar:
@@ -387,7 +448,7 @@ class HealthBar:
 
         screen.blit(self.bg_panel, (self.x, self.y))
         
-        fill_width = max(0.0, min(hp, 100.0)) * 0.01 * self.width  # Avoid division
+        fill_width = max(0.0, min(hp, 100.0)) * 0.01 * self.width
         pygame.draw.rect(screen, self.fill_color, (self.x, self.y, fill_width, self.height))
 
         hp_text = self.font.render(f"HP {int(hp)}%", True, self.text_color)
@@ -414,7 +475,6 @@ class MissionTracker:
             total = int(self.shared_state.get("missions_total", 5))
 
         text = f"Daily Mission: {completed}/{total} Completed"
-
         text_surface = self.font.render(text, True, self.text_color)
 
         width = text_surface.get_width() + 20
@@ -423,7 +483,6 @@ class MissionTracker:
         x = SCREEN_WIDTH - width - self.padding
         y = SCREEN_HEIGHT - 60  # Slightly above health bar
 
-        # Frosted background
         panel = pygame.Surface((width, height), pygame.SRCALPHA)
         panel.fill(self.bg_color)
         screen.blit(panel, (x, y))
