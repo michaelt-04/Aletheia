@@ -9,8 +9,10 @@ import os
 import numpy as np
 import cv2
 
-# Change E: prefer kmsdrm for direct GPU access (falls back to X11 if unavailable)
-os.environ.setdefault("SDL_VIDEODRIVER", "kmsdrm")
+# Change E: prefer kmsdrm for direct GPU access when running from a TTY (not desktop).
+# Only set if no display server is active — kmsdrm fails under X11/Wayland.
+if "DISPLAY" not in os.environ and "WAYLAND_DISPLAY" not in os.environ:
+    os.environ.setdefault("SDL_VIDEODRIVER", "kmsdrm")
 
 
 def resolve_model_path(filename: str) -> str:
