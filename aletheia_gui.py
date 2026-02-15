@@ -34,7 +34,7 @@ class QuestManager:
     """
     Manages Quests with Coordinate Fix + Big Buttons.
     """
-    __slots__ = ("shared_state", "state_lock", "font_title", "font_body", "font_timer", "fog_sprite", "active_target", "quest_state", "timer_start", "timer_duration", "was_pinching", "carbon_table", "tracked_targets")
+    __slots__ = ("shared_state", "state_lock", "font_title", "font_body", "font_timer", "fog_sprite", "active_target", "quest_state", "timer_start", "timer_duration", "was_pinching", "carbon_table", "tracked_targets", "_logged_target", "_dbg_count")
 
     def __init__(self, shared_state, state_lock):
         self.shared_state = shared_state; self.state_lock = state_lock
