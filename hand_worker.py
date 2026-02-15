@@ -9,8 +9,13 @@ import cv2
 from multiprocessing.shared_memory import SharedMemory
 
 # Landmark indices
-THUMB_TIP = 4
+WRIST = 0
+INDEX_MCP = 5
 INDEX_TIP = 8
+MIDDLE_MCP = 9
+MIDDLE_TIP = 12
+RING_TIP = 16
+PINKY_TIP = 20
 
 def hand_worker_fn(
     palm_model_path,
@@ -55,10 +60,10 @@ def hand_worker_fn(
     # Smoothing State
     smooth_x, smooth_y = 0.0, 0.0
 
-    # Pinch Configuration
-    is_pinching = False
-    PINCH_GRAB_DIST = 65     # px
-    PINCH_RELEASE_DIST = 80  # px
+    # Fist detection: avg fingertip-to-wrist distance (in detect_frame pixels)
+    is_fist = False
+    FIST_CLOSE_DIST = 45   # below this → fist closed (clicking)
+    FIST_OPEN_DIST = 65    # above this → hand open (not clicking)
 
     grace_frames = 0
     MAX_GRACE = 4
@@ -127,21 +132,30 @@ def hand_worker_fn(
 
             grace_frames = 0
             lm = result["landmarks_px"]
-            thumb = lm[THUMB_TIP]
-            index = lm[INDEX_TIP]
 
-            # 1. Detect Pinch
-            dist_pinch = math.hypot(thumb[0] - index[0], thumb[1] - index[1])
-            if not is_pinching and dist_pinch < PINCH_GRAB_DIST:
-                is_pinching = True
-            elif is_pinching and dist_pinch > PINCH_RELEASE_DIST:
-                is_pinching = False
+            # 1. Cursor = palm center (stable regardless of finger position)
+            palm_x = (lm[WRIST][0] + lm[MIDDLE_MCP][0]) / 2.0
+            palm_y = (lm[WRIST][1] + lm[MIDDLE_MCP][1]) / 2.0
 
-            # 2. Map to screen coordinates (detect_frame dimensions)
-            raw_x = float(index[0]) * screen_width / max(DETECT_W, 1)
-            raw_y = float(index[1]) * screen_height / max(DETECT_H, 1)
+            # 2. Fist detection: average fingertip-to-wrist distance
+            wrist = lm[WRIST]
+            avg_tip_dist = sum(
+                math.hypot(lm[tip][0] - wrist[0], lm[tip][1] - wrist[1])
+                for tip in (INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP)
+            ) / 4.0
 
-            # 3. Adaptive Smoothing
+            if not is_fist and avg_tip_dist < FIST_CLOSE_DIST:
+                is_fist = True
+                print(f"[HandWorker] FIST closed (avg_dist={avg_tip_dist:.0f}px)")
+            elif is_fist and avg_tip_dist > FIST_OPEN_DIST:
+                is_fist = False
+                print(f"[HandWorker] FIST opened (avg_dist={avg_tip_dist:.0f}px)")
+
+            # 3. Map palm center to screen coordinates
+            raw_x = float(palm_x) * screen_width / max(DETECT_W, 1)
+            raw_y = float(palm_y) * screen_height / max(DETECT_H, 1)
+
+            # 4. Adaptive Smoothing
             move_dist = math.hypot(raw_x - smooth_x, raw_y - smooth_y)
             alpha = 0.15 + (0.7 * min(move_dist / 150.0, 1.0))
 
@@ -155,18 +169,18 @@ def hand_worker_fn(
         else:
             grace_frames += 1
             if grace_frames > MAX_GRACE:
-                is_pinching = False
+                is_fist = False
             # Invalidate palm cache if hand lost too long
             if grace_frames > MAX_GRACE * 2:
                 cached_palm = None
             cursor = (int(smooth_x), int(smooth_y))
 
-        # Send
+        # Send (keep key names for GUI compatibility)
         try:
             if result_queue.full(): result_queue.get_nowait()
             result_queue.put_nowait({
                 "index_finger_tip": cursor,
-                "is_pinching": is_pinching,
+                "is_pinching": is_fist,
             })
         except: pass
 
