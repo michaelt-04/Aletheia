@@ -254,8 +254,16 @@ class HandTrackingThread(threading.Thread):
 
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    # Fullscreen (no borders), use the display's native resolution
+    flags = pygame.FULLSCREEN | pygame.NOFRAME | pygame.HWSURFACE | pygame.DOUBLEBUF
+    screen = pygame.display.set_mode((0, 0), flags)
+
+    # Update constants to actual fullscreen resolution
+    SCREEN_WIDTH, SCREEN_HEIGHT = screen.get_size()
+
+    pygame.mouse.set_visible(False)
     pygame.display.set_caption("Aletheia OS")
+
     clock = pygame.time.Clock()
 
     # Init GUI Components (repo-accurate constructors)
