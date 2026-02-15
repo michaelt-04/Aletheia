@@ -319,12 +319,13 @@ def main():
             is_pinching = shared_state.get("is_pinching", False)
 
         # Update UI logic
-        spirit.update(dt, cursor, is_pinching)
+        spirit.update()
 
-        overlay.update(detections)
-        health_bar.update(shared_state.get("health", 100))
-        mission_tracker.update(shared_state.get("mission", "Explore"))
-        carbon_widget.update(shared_state.get("carbon_saved", 0.0))
+        overlay.update()
+        health_bar.update()
+        mission_tracker.update()
+        carbon_widget.update()
+
 
         # Draw everything
         screen.fill((0, 0, 0))
