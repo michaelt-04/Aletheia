@@ -146,18 +146,34 @@ class YOLODetector:
         if raw.ndim == 3:
             raw = raw[0]  # [300, 6]
 
-        # [cx, cy, w, h, confidence, class_id]
-        cx, cy, bw, bh = raw[:, 0], raw[:, 1], raw[:, 2], raw[:, 3]
         confidences = raw[:, 4]
         class_ids = np.round(raw[:, 5]).astype(int)
 
-        x1 = cx - bw / 2
-        y1 = cy - bh / 2
-        x2 = cx + bw / 2
-        y2 = cy + bh / 2
-
-        # confidence filter
+        # Auto-detect output format: end2end models output [x1,y1,x2,y2],
+        # standard models output [cx,cy,w,h]. In xyxy, col2 > col0 always.
         mask = confidences >= self.confidence_threshold
+        if mask.any():
+            v = raw[mask]
+            is_xyxy = bool(np.all(v[:, 2] > v[:, 0]) and np.all(v[:, 3] > v[:, 1]))
+        else:
+            is_xyxy = False
+
+        if not hasattr(self, '_format_logged'):
+            self._format_logged = True
+            fmt = "xyxy" if is_xyxy else "cxcywh"
+            print(f"[YOLODetector] Output format: {fmt}")
+            if mask.any():
+                s = raw[mask][0]
+                print(f"[YOLODetector]   Sample cols 0-3: {s[:4]}")
+
+        if is_xyxy:
+            x1, y1, x2, y2 = raw[:, 0], raw[:, 1], raw[:, 2], raw[:, 3]
+        else:
+            cx, cy, bw, bh = raw[:, 0], raw[:, 1], raw[:, 2], raw[:, 3]
+            x1 = cx - bw / 2
+            y1 = cy - bh / 2
+            x2 = cx + bw / 2
+            y2 = cy + bh / 2
         x1, y1, x2, y2 = x1[mask], y1[mask], x2[mask], y2[mask]
         confidences = confidences[mask]
         class_ids = class_ids[mask]

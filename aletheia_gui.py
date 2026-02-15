@@ -85,6 +85,12 @@ class QuestManager:
                 self.tracked_targets.append({'x': cx, 'y': cy, 'last_seen': now, 'data': det})
         self.tracked_targets = [t for t in self.tracked_targets if now - t['last_seen'] < 0.8]
 
+        if not hasattr(self, '_logged_target') and self.tracked_targets:
+            self._logged_target = True
+            t = self.tracked_targets[0]
+            print(f"[Quest] Target '{t['data'].get('label')}' at screen ({t['x']:.0f}, {t['y']:.0f}) "
+                  f"from box {t['data'].get('box')} (screen={sw}x{sh})")
+
     def draw(self, screen, state_snapshot, dt=0.016):
         is_pinching = state_snapshot.get("is_pinching", False)
         cursor = state_snapshot.get("index_finger_tip", (0, 0))
@@ -100,12 +106,21 @@ class QuestManager:
             for target in self.tracked_targets:
                 cx, cy = int(target['x']), int(target['y'])
                 self._draw_fog(screen, cx, cy, dt)
-                if math.hypot(cursor[0]-cx, cursor[1]-cy) < 100:
+                dist = math.hypot(cursor[0]-cx, cursor[1]-cy)
+                if dist < 100:
                     hovering = True
                     if is_pinching:
+                        print(f"[Quest] CLICKED fog at ({cx},{cy}), cursor at {cursor}")
                         self.active_target = target['data']
                         self.quest_state = "OFFER"
-                        self.was_pinching = True 
+                        self.was_pinching = True
+            # Debug: log cursor-to-fog distance periodically
+            if not hasattr(self, '_dbg_count'): self._dbg_count = 0
+            self._dbg_count += 1
+            if self._dbg_count % 90 == 0 and self.tracked_targets:
+                t = self.tracked_targets[0]
+                d = math.hypot(cursor[0]-t['x'], cursor[1]-t['y'])
+                print(f"[Quest] cursor={cursor} fog=({t['x']:.0f},{t['y']:.0f}) dist={d:.0f} pinch={is_pinching}")
             self._draw_cursor(screen, cursor, is_pinching, hovering)
 
         elif self.quest_state == "OFFER":
