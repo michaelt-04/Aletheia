@@ -219,6 +219,10 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self._pristine_phase = "idle"
         self._return_progress = 0.0
 
+        # How long after waste leaves view before we calm down
+        self.waste_timeout_seconds = 10.0
+        self._last_waste_seen_epoch = 0.0
+
         # Target colors
         self.color_calm = pygame.Vector3(80, 255, 150)
         self.color_angry = pygame.Vector3(255, 40, 40)
@@ -313,6 +317,13 @@ class SpiritCompanion(pygame.sprite.Sprite):
                 detections = self.shared_state.get("detected_objects", [])
 
         waste_present = energy_waste_count > 0 or any(d.get("carbon_impact") == "high" for d in detections)
+        # Record when waste was last seen
+        if waste_present:
+            self._last_waste_seen_epoch = epoch_now
+
+        # Waste is considered "effectively present" for 10s after it disappears
+        waste_effective = (epoch_now - self._last_waste_seen_epoch) <= self.waste_timeout_seconds
+
 
         quest_complete = False
         if carbon_saved_event_time > 0.0:
@@ -328,10 +339,13 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
         # --- STRICT FSM transitions ---
         if self.fsm_state == "calm":
-            if waste_present and epoch_now >= self._post_pristine_cooldown_until:
+            if waste_effective and epoch_now >= self._post_pristine_cooldown_until:
                 self.fsm_state = "angry"
         elif self.fsm_state == "angry":
-            if quest_complete:
+            # If waste has been out of view for > 10s, return to calm
+            if not waste_effective:
+                self.fsm_state = "calm"
+            elif quest_complete:
                 self._pristine_active = True
                 self._pristine_phase = "in"
                 self.celebration_progress = 0.0
