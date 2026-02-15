@@ -117,10 +117,11 @@ def hand_worker_fn(
     FIST_CLOSE_RATIO = 1.3   # below this → fist closed
     FIST_OPEN_RATIO = 1.8    # above this → hand open
 
-    # Debounce: require N consecutive frames to confirm state change
-    fist_close_count = 0
-    fist_open_count = 0
-    FIST_DEBOUNCE = 3
+    # Time-based debounce: condition must hold continuously for this duration.
+    # Works the same at 30 Hz (Mac) and 2-5 Hz (Pi).
+    fist_close_since = None   # timestamp when ratio first went below close threshold
+    fist_open_since = None    # timestamp when ratio first went above open threshold
+    FIST_CONFIRM_SECS = 0.15  # 150ms — ~5 frames on Mac, ~1 frame on Pi
 
     grace_frames = 0
     MAX_GRACE = 4
@@ -218,25 +219,27 @@ def hand_worker_fn(
                 print(f"[HandWorker] fist_ratio={fist_ratio:.2f} "
                       f"(tip={avg_tip_dist:.0f}px, base={hand_base:.0f}px, fist={is_fist})")
 
-            # Debounce: require consecutive frames to confirm state change
+            # Time-based debounce: condition must hold for FIST_CONFIRM_SECS
             if not is_fist:
                 if fist_ratio < FIST_CLOSE_RATIO:
-                    fist_close_count += 1
-                    if fist_close_count >= FIST_DEBOUNCE:
+                    if fist_close_since is None:
+                        fist_close_since = now
+                    elif now - fist_close_since >= FIST_CONFIRM_SECS:
                         is_fist = True
-                        fist_close_count = 0
+                        fist_close_since = None
                         print(f"[HandWorker] FIST closed (ratio={fist_ratio:.2f})")
                 else:
-                    fist_close_count = 0
+                    fist_close_since = None
             else:
                 if fist_ratio > FIST_OPEN_RATIO:
-                    fist_open_count += 1
-                    if fist_open_count >= FIST_DEBOUNCE:
+                    if fist_open_since is None:
+                        fist_open_since = now
+                    elif now - fist_open_since >= FIST_CONFIRM_SECS:
                         is_fist = False
-                        fist_open_count = 0
+                        fist_open_since = None
                         print(f"[HandWorker] FIST opened (ratio={fist_ratio:.2f})")
                 else:
-                    fist_open_count = 0
+                    fist_open_since = None
 
             # 3. Map palm center to screen coordinates
             raw_x = float(palm_x) * screen_width / max(DETECT_W, 1)
