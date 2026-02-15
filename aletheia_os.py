@@ -8,7 +8,7 @@ import time
 import math
 import os
 import sys
-from aletheia_gui import SpiritCompanion, GreyFog, DetectionOverlay, HealthBar, ExperienceBar
+from aletheia_gui import SpiritCompanion, GreyFog, DetectionOverlay, HealthBar, MissionTracker
 
 # RPi-specific camera controller
 from camera_rpi import RPiCamera
@@ -43,8 +43,9 @@ shared_state = {
     "inference_ms": 0.0,
     "detection_count": 0,
     "health": 100,
-    "experience": 0,
-}
+    "missions_completed": 0,
+    "missions_total": 5
+    }
 state_lock = threading.Lock()
 
 
@@ -124,7 +125,9 @@ def main():
     grey_fog = GreyFog(shared_state, state_lock)
     detection_overlay = DetectionOverlay(shared_state, state_lock)
     health_bar = HealthBar(shared_state, state_lock)
-    experience_bar = ExperienceBar(shared_state, state_lock)
+    #experience_bar = ExperienceBar(shared_state, state_lock)
+    mission_tracker = MissionTracker(shared_state, state_lock)
+
 
     # --- Start RPi Camera Controller ---
     print("[Main] Initializing RPi Camera...")
@@ -164,7 +167,7 @@ def main():
         all_sprites.draw(screen)
         detection_overlay.draw(screen)
         health_bar.draw(screen)
-        experience_bar.draw(screen)
+        mission_tracker.draw(screen)
 
         # Draw hand cursor
         with state_lock:

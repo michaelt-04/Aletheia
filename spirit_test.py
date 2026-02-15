@@ -13,7 +13,7 @@ import threading
 import time
 import math
 import random  # SpiritCompanion uses this but doesn't import it, so we do.
-from aletheia_gui import SpiritCompanion, GreyFog, DetectionOverlay, HealthBar, ExperienceBar
+from aletheia_gui import SpiritCompanion, GreyFog, DetectionOverlay, HealthBar, MissionTracker
 
 # --- Configuration ---
 SCREEN_WIDTH, SCREEN_HEIGHT = 1920, 1080
@@ -56,7 +56,7 @@ def main():
     grey_fog = GreyFog(shared_state, state_lock)
     detection_overlay = DetectionOverlay(shared_state, state_lock)
     health_bar = HealthBar(shared_state, state_lock)
-    experience_bar = ExperienceBar(shared_state, state_lock)
+    mission_tracker = MissionTracker(shared_state, state_lock)
     
     # Fonts for test info display
     font = pygame.font.Font(None, 36)
@@ -121,7 +121,7 @@ def main():
         all_sprites.draw(screen)
         detection_overlay.draw(screen)
         health_bar.draw(screen)
-        experience_bar.draw(screen)
+        mission_tracker.draw(screen)
 
         # Draw a mock cursor (since the real one is in the OS)
         cursor_color = (50, 255, 50) if is_pinching_now else (255, 255, 255)

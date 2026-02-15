@@ -394,34 +394,38 @@ class HealthBar:
         screen.blit(hp_text, (self.x + 5, self.y + 2))
 
 
-class ExperienceBar:
-    """Optimized XP bar."""
-    __slots__ = ('shared_state', 'state_lock', 'width', 'height', 'font',
-                 'fill_color', 'text_color', 'bg_panel', 'x', 'y')
-    
-    def __init__(self, shared_state, state_lock, health_bar_height=20, offset_y=6):
+class MissionTracker:
+    """
+    Displays daily carbon mission progress.
+    Example: Daily Mission: 2/5 Completed
+    """
+    def __init__(self, shared_state, state_lock):
         self.shared_state = shared_state
         self.state_lock = state_lock
-        self.width = 200
-        self.height = 15
-        self.font = pygame.font.Font(None, 18)
-        self.fill_color = (80, 200, 255)
+        self.padding = 10
+        self.font = pygame.font.Font(None, 22)
+
+        self.bg_color = (255, 255, 255, 25)
         self.text_color = (255, 255, 255)
-        
-        self.bg_panel = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        self.bg_panel.fill((255, 255, 255, 25))
-        
-        self.x = SCREEN_WIDTH - self.width - 10
-        self.y = SCREEN_HEIGHT - health_bar_height - offset_y - self.height - 10
 
     def draw(self, screen):
         with self.state_lock:
-            xp = self.shared_state.get("experience", 0)
+            completed = int(self.shared_state.get("missions_completed", 0))
+            total = int(self.shared_state.get("missions_total", 5))
 
-        screen.blit(self.bg_panel, (self.x, self.y))
-        
-        fill_width = max(0.0, min(xp, 100.0)) * 0.01 * self.width
-        pygame.draw.rect(screen, self.fill_color, (self.x, self.y, fill_width, self.height))
+        text = f"Daily Mission: {completed}/{total} Completed"
 
-        xp_text = self.font.render(f"XP {int(xp)}%", True, self.text_color)
-        screen.blit(xp_text, (self.x + 5, self.y + 1))
+        text_surface = self.font.render(text, True, self.text_color)
+
+        width = text_surface.get_width() + 20
+        height = text_surface.get_height() + 10
+
+        x = SCREEN_WIDTH - width - self.padding
+        y = SCREEN_HEIGHT - 60  # Slightly above health bar
+
+        # Frosted background
+        panel = pygame.Surface((width, height), pygame.SRCALPHA)
+        panel.fill(self.bg_color)
+        screen.blit(panel, (x, y))
+
+        screen.blit(text_surface, (x + 10, y + 5))
