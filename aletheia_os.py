@@ -5,29 +5,23 @@
 import pygame
 import threading
 import time
-import math
 import os
-import sys
 import numpy as np
+import cv2
 
 # Feature flags
-# Set this to 0 to run YOLO + GUI only (no hand model required):
+# Run YOLO + GUI only:
 #   ALETHEIA_ENABLE_HANDS=0 python aletheia_os.py
 ENABLE_HANDS = os.getenv("ALETHEIA_ENABLE_HANDS", "1") == "1"
 
 # RPi-specific camera controller (now also handles webcam fallback)
 from camera_rpi import get_camera_manager
 
-# GUI Components
+# GUI Components (repo-accurate: most widgets are draw-only; Spirit is a Sprite)
 from aletheia_gui import SpiritCompanion, DetectionOverlay, HealthBar, MissionTracker, CarbonSavingsWidget
 
-# Vision libraries
-import cv2
-
-# Hand detection (optional): ExecuTorch BlazePalm (.pte)
-# Disabled by default via ALETHEIA_ENABLE_HANDS=0
-
 # YOLO Detection Components
+# NOTE: if your yolo_engine.py is in project root, use: from yolo_engine import YOLODetector
 from meta_yolo.yolo_engine import YOLODetector
 
 
@@ -38,7 +32,7 @@ FPS = 60
 # BlazePalm / hand detector model (.pte)
 BLAZEPALM_MODEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "blazepalm_xnnpack.pte"  # <-- replace with your actual .pte filename
+    "blazepalm_xnnpack.pte"
 )
 
 # YOLO Object Detection model path
@@ -47,20 +41,20 @@ YOLO_MODEL_PATH = os.path.join(
     "yolo26n_xnnpack.pte"
 )
 
-# --- Shared State Dictionary ---
+# --- Shared State Dictionary (matches aletheia_gui.py expectations) ---
 shared_state = {
     "is_pinching": False,
     "index_finger_tip": (0, 0),
 
-    # GUI expects this name (not "detections")
+    # GUI expects this name:
     "detected_objects": [],
 
-    # SpiritCompanion reads these
+    # SpiritCompanion reads these:
     "energy_waste_count": 0,
     "last_savings_event": "",
     "last_savings_event_time": 0.0,
 
-    # Other HUD widgets read these
+    # Other HUD widgets read these:
     "health": 100,
     "missions_completed": 0,
     "missions_total": 5,
@@ -69,14 +63,12 @@ shared_state = {
     "app_quit": False,
 }
 
-
 state_lock = threading.Lock()
 
 
-# --- YOLO Detection Thread ---
+# --- YOLO Detection Thread (throttled) ---
 class YoloDetectionThread(threading.Thread):
-    def __init__(self, model_path, camera, shared_state, state_lock,
-                 target_hz=10):
+    def __init__(self, model_path, camera, shared_state, state_lock, target_hz=10):
         super().__init__(daemon=True)
         self.model_path = model_path
         self.camera = camera
@@ -88,7 +80,6 @@ class YoloDetectionThread(threading.Thread):
 
     def run(self):
         print("[YoloDetectionThread] Starting...")
-
         try:
             self.detector = YOLODetector(self.model_path)
         except Exception as e:
@@ -98,7 +89,6 @@ class YoloDetectionThread(threading.Thread):
             return
 
         print("[YoloDetectionThread] Waiting for camera frames...")
-
         period = 1.0 / max(self.target_hz, 0.1)
         next_t = time.time()
 
@@ -107,13 +97,11 @@ class YoloDetectionThread(threading.Thread):
                 if self.shared_state["app_quit"]:
                     break
 
-            # Rate-limit to target_hz (time-based, smooth cadence)
             now = time.time()
             if now < next_t:
                 time.sleep(min(0.002, next_t - now))
                 continue
 
-            # Schedule the next tick; if we fell behind, don't drift forever
             next_t += period
             if now - next_t > 0.5:
                 next_t = now + period
@@ -133,44 +121,33 @@ class YoloDetectionThread(threading.Thread):
                 detections = []
 
             with self.state_lock:
+                # IMPORTANT: GUI reads detected_objects
                 self.shared_state["detected_objects"] = detections
 
         print("[YoloDetectionThread] Stopped.")
 
 
-# --- HandTrackingThread (ExecuTorch BlazePalm detector, no MediaPipe) ---
+# --- HandTrackingThread (ExecuTorch BlazePalm detector, optional) ---
 class HandTrackingThread(threading.Thread):
     """
-    Uses ExecuTorch hand detector (.pte). Provides:
-      - shared_state["index_finger_tip"]: cursor point (x,y) in screen coords
-      - shared_state["is_pinching"]: pinch boolean (placeholder False)
-
-    Smoothness:
-      - Runs at target_hz (default 18Hz)
-      - Applies light exponential smoothing to cursor to reduce jitter
-        without noticeable added latency.
+    Optional ExecuTorch hand box detector (.pte).
+    Provides:
+      - shared_state["index_finger_tip"]: cursor point in screen coords
+      - shared_state["is_pinching"]: currently always False
     """
     def __init__(self, model_path, camera, shared_state, state_lock,
-                 input_size=256, confidence=0.6,
-                 target_hz=18,
-                 smoothing=0.35):
+                 input_size=256, confidence=0.6, target_hz=18, smoothing=0.35):
         super().__init__(daemon=True)
         self.model_path = model_path
         self.camera = camera
         self.shared_state = shared_state
         self.state_lock = state_lock
-        self.input_size = input_size
-        self.confidence = confidence
+        self.input_size = int(input_size)
+        self.confidence = float(confidence)
         self.target_hz = float(target_hz)
-
-        # smoothing in [0..1]:
-        #   0.0 = no smoothing (most responsive, most jitter)
-        #   0.25-0.45 = good on Pi
-        #   1.0 = extremely smooth but laggy (avoid)
         self.smoothing = float(smoothing)
-
         self.detector = None
-        self._cursor_f = None  # float cursor for smoothing
+        self._cursor_f = None
 
     def run(self):
         print("[HandTrackingThread] Starting (ExecuTorch BlazePalm)...")
@@ -195,7 +172,6 @@ class HandTrackingThread(threading.Thread):
             return
 
         print("[HandTrackingThread] Waiting for camera frames...")
-
         period = 1.0 / max(self.target_hz, 0.1)
         next_t = time.time()
 
@@ -204,7 +180,6 @@ class HandTrackingThread(threading.Thread):
                 if self.shared_state["app_quit"]:
                     break
 
-            # Rate-limit to target_hz
             now = time.time()
             if now < next_t:
                 time.sleep(min(0.002, next_t - now))
@@ -218,7 +193,6 @@ class HandTrackingThread(threading.Thread):
             if frame_rgb is None:
                 continue
 
-            # Mirror for natural interaction
             frame_rgb = cv2.flip(frame_rgb, 1)
 
             try:
@@ -227,9 +201,8 @@ class HandTrackingThread(threading.Thread):
                 print(f"[HandTrackingThread] ERROR during detect: {e}")
                 dets = []
 
-            # Cursor behavior: best hand box -> use "upper" point in box
             cursor = None
-            pinch = False
+            pinch = False  # placeholder until landmarks exist
 
             if dets:
                 best = dets[0]
@@ -243,14 +216,9 @@ class HandTrackingThread(threading.Thread):
                 sy = float(cy) * SCREEN_HEIGHT / max(h, 1)
                 cursor = (sx, sy)
 
-            # If no detection this frame, keep last cursor (prevents snapping to 0,0)
             if cursor is None:
-                if self._cursor_f is not None:
-                    cursor = self._cursor_f
-                else:
-                    cursor = (0.0, 0.0)
+                cursor = self._cursor_f if self._cursor_f is not None else (0.0, 0.0)
 
-            # Exponential smoothing (low latency)
             if self._cursor_f is None:
                 self._cursor_f = cursor
             else:
@@ -269,23 +237,20 @@ class HandTrackingThread(threading.Thread):
         print("[HandTrackingThread] Stopped.")
 
 
-
-# --- Main Application Logic ---
 def main():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("Aletheia OS")
     clock = pygame.time.Clock()
 
-    # Init GUI Components
-    # Init GUI Components (stateful widgets)
+    # Init GUI Components (repo-accurate constructors)
     spirit = SpiritCompanion(shared_state, state_lock)
+    spirit_group = pygame.sprite.Group(spirit)
+
     overlay = DetectionOverlay(shared_state, state_lock)
     health_bar = HealthBar(shared_state, state_lock)
     mission_tracker = MissionTracker(shared_state, state_lock)
     carbon_widget = CarbonSavingsWidget(shared_state, state_lock)
-
-
 
     print("[Main] Initializing Camera...")
     camera = get_camera_manager()
@@ -297,18 +262,19 @@ def main():
         model_path=YOLO_MODEL_PATH,
         camera=camera,
         shared_state=shared_state,
-        state_lock=state_lock
+        state_lock=state_lock,
+        target_hz=10
     )
     yolo_thread.start()
 
     # Start Hand thread (optional)
-    hand_thread = None
     if ENABLE_HANDS:
         hand_thread = HandTrackingThread(
             model_path=BLAZEPALM_MODEL_PATH,
             camera=camera,
             shared_state=shared_state,
-            state_lock=state_lock
+            state_lock=state_lock,
+            target_hz=18
         )
         hand_thread.start()
     else:
@@ -317,48 +283,50 @@ def main():
     print("[Main] Entering main loop...")
 
     running = True
-    while running:
-        dt = clock.tick(FPS) / 1000.0
+    cam_surface = None
+    cam_update_every = 3  # update camera texture every N GUI frames (~20fps at 60fps)
+    cam_counter = 0
 
-        # Handle events
+    while running:
+        clock.tick(FPS)
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
 
-        # Read shared state
-        with state_lock:
-            detections = shared_state.get("detected_objects", [])
-            cursor = shared_state.get("index_finger_tip", (0, 0))
-            is_pinching = shared_state.get("is_pinching", False)
+        # If hands disabled, use mouse as cursor/pinch for testing
+        if not ENABLE_HANDS:
+            mx, my = pygame.mouse.get_pos()
+            with state_lock:
+                shared_state["index_finger_tip"] = (mx, my)
+                shared_state["is_pinching"] = pygame.mouse.get_pressed()[0]
 
-        # Update UI logic
-        spirit.update()
+        # Update Spirit (Sprite update)
+        spirit_group.update()
 
-    
-
-
-        # Draw everything
+        # Draw
         screen.fill((0, 0, 0))
 
-        # Draw camera background if your GUI expects it (optional)
-        frame = camera.get_frame()
-        if frame is not None:
-            # frame is RGB; pygame expects (w,h) surface with 3 channels
-            # Convert to surface (note: pygame uses (width,height))
-            surf = pygame.surfarray.make_surface(np.rot90(frame))
-            surf = pygame.transform.scale(surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
-            screen.blit(surf, (0, 0))
+        # Camera background (throttled conversion for FPS)
+        cam_counter += 1
+        if cam_counter % cam_update_every == 0:
+            frame = camera.get_frame()
+            if frame is not None:
+                # frame is RGB
+                surf = pygame.surfarray.make_surface(np.rot90(frame))
+                cam_surface = pygame.transform.scale(surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
+
+        if cam_surface is not None:
+            screen.blit(cam_surface, (0, 0))
 
         overlay.draw(screen)
-
-        spirit.draw(screen)
+        spirit_group.draw(screen)
         health_bar.draw(screen)
         mission_tracker.draw(screen)
         carbon_widget.draw(screen)
 
         pygame.display.flip()
 
-    # Shutdown
     print("[Main] Shutting down...")
     with state_lock:
         shared_state["app_quit"] = True
