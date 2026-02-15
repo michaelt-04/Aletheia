@@ -267,7 +267,7 @@ def main():
             YOLO_MODEL_PATH,
             shm.name,
             FRAME_SHAPE,
-            str(FRAME_DTYPE),
+            np.dtype(FRAME_DTYPE).name,
             frame_seq,
             yolo_result_queue,
             yolo_stop_event,
