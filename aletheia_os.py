@@ -222,8 +222,9 @@ def main():
     cam_update_every = 3  # update camera texture every N GUI frames
     cam_counter = 0
 
-    # Frame feeder: copy camera frame to shared memory for YOLO worker
-    _feed_every = max(1, int(FPS / YOLO_TARGET_HZ))
+    # Frame feeder: copy camera frame to shared memory for both workers
+    _max_worker_hz = max(YOLO_TARGET_HZ, HAND_TARGET_HZ) if ENABLE_HANDS else YOLO_TARGET_HZ
+    _feed_every = max(1, int(FPS / _max_worker_hz))
     _feed_counter = 0
 
     # --- Instrumentation (Change A) ---

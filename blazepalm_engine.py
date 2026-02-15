@@ -87,7 +87,8 @@ class BlazeHandTracker:
         """Decode palm detections using anchors + NMS."""
         scores = raw_scores[0, :, 0]
         boxes = raw_boxes[0]
-        scores = 1.0 / (1.0 + np.exp(-np.clip(scores, -100, 100)))
+        with np.errstate(over='ignore'):
+            scores = 1.0 / (1.0 + np.exp(-np.clip(scores, -100, 100)))
 
         mask = scores >= self.palm_score_thresh
         if not mask.any():

@@ -34,7 +34,7 @@ def hand_worker_fn(
     screen_width,
     screen_height,
     target_hz=15.0,
-    smoothing=0.35,
+    smoothing=0.15,
 ):
     """
     Hand tracking worker — runs in a separate process with its own GIL.
@@ -45,6 +45,8 @@ def hand_worker_fn(
     print("[HandWorker] Starting in separate process...")
 
     # Heavy imports inside worker process only
+    import torch
+    torch.set_num_threads(2)  # Limit XNNPACK threadpool to avoid contention on Pi 4
     from blazepalm_engine import BlazeHandTracker
 
     # Attach to shared memory (created by main process, shared with YOLO worker)
