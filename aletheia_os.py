@@ -28,7 +28,8 @@ import cv2
 # Disabled by default via ALETHEIA_ENABLE_HANDS=0
 
 # YOLO Detection Components
-from yolo_engine import YOLODetector
+from meta_yolo.yolo_engine import YOLODetector
+
 
 # --- Global Constants ---
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
