@@ -9,6 +9,25 @@ import os
 import numpy as np
 import cv2
 
+
+def resolve_model_path(filename: str) -> str:
+    base = os.path.dirname(os.path.abspath(__file__))
+
+    candidates = [
+        os.path.join(base, filename),
+        os.path.join(base, "models", filename),
+        os.path.join(base, "meta-yolo", filename),
+        os.path.join(base, "meta_yolo", filename),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            print(f"[ModelPath] Using {p}")
+            return p
+
+    print("[ModelPath] ERROR: model file not found. Tried:")
+    for p in candidates:
+        print("  -", p)
+    return candidates[0]  
 # Feature flags
 # Run YOLO + GUI only:
 #   ALETHEIA_ENABLE_HANDS=0 python aletheia_os.py
@@ -30,16 +49,12 @@ SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
 FPS = 60
 
 # BlazePalm / hand detector model (.pte)
-BLAZEPALM_MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "blazepalm_xnnpack.pte"
-)
+BLAZEPALM_MODEL_PATH = resolve_model_path("blazepalm_xnnpack.pte")
 
 # YOLO Object Detection model path
-YOLO_MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "yolo26n_xnnpack.pte"
-)
+YOLO_MODEL_PATH = resolve_model_path("yolo26n_xnnpack.pte")
+
+SHOW_CAMERA_BG = os.getenv("ALETHEIA_SHOW_CAMERA", "0") == "1"
 
 # --- Shared State Dictionary (matches aletheia_gui.py expectations) ---
 shared_state = {
@@ -316,8 +331,9 @@ def main():
                 surf = pygame.surfarray.make_surface(np.rot90(frame))
                 cam_surface = pygame.transform.scale(surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
 
-        if cam_surface is not None:
+        if SHOW_CAMERA_BG and cam_surface is not None:
             screen.blit(cam_surface, (0, 0))
+
 
         overlay.draw(screen)
         spirit_group.draw(screen)
