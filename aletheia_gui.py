@@ -26,7 +26,10 @@ class CarbonSavingsWidget:
         "shared_state", "state_lock",
         "font_large", "font_small",
         "padding", "width", "height",
-        "displayed_value", "panel_alpha"
+        "displayed_value", "panel_alpha",
+        "_panel", "_title_surf",
+        "_cached_value_text", "_cached_value_surf",
+        "_cached_event_text", "_cached_event_surf",
     )
 
     def __init__(self, shared_state, state_lock, *, panel_alpha: int = 90):
@@ -43,10 +46,24 @@ class CarbonSavingsWidget:
         self.displayed_value = 0.0  # smooth count-up
         self.panel_alpha = panel_alpha
 
-    def draw(self, screen):
-        with self.state_lock:
-            total_saved = float(self.shared_state.get("carbon_saved_g", 0.0))
-            last_event = self.shared_state.get("last_savings_event", "")
+        # Pre-allocate panel surface (reused every frame)
+        self._panel = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        # Static title — rendered once
+        self._title_surf = self.font_small.render("Carbon Reduced", True, (120, 255, 160))
+        # Font render caches
+        self._cached_value_text = ""
+        self._cached_value_surf = None
+        self._cached_event_text = ""
+        self._cached_event_surf = None
+
+    def draw(self, screen, state_snapshot=None):
+        if state_snapshot is not None:
+            total_saved = float(state_snapshot.get("carbon_saved_g", 0.0))
+            last_event = state_snapshot.get("last_savings_event", "")
+        else:
+            with self.state_lock:
+                total_saved = float(self.shared_state.get("carbon_saved_g", 0.0))
+                last_event = self.shared_state.get("last_savings_event", "")
 
         # Smooth animated count-up
         self.displayed_value += (total_saved - self.displayed_value) * 0.08
@@ -57,23 +74,27 @@ class CarbonSavingsWidget:
         x = screen_width - self.width - self.padding
         y = self.padding
 
-        # Background panel (more transparent)
-        panel = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-        panel.fill((0, 0, 0, self.panel_alpha))
-        screen.blit(panel, (x, y))
+        # Re-use pre-allocated panel
+        self._panel.fill((0, 0, 0, self.panel_alpha))
+        screen.blit(self._panel, (x, y))
 
-        # Title
-        title = self.font_small.render("Carbon Reduced", True, (120, 255, 160))
-        screen.blit(title, (x + 15, y + 10))
+        # Static title
+        screen.blit(self._title_surf, (x + 15, y + 10))
 
-        # Big number (use CO2e for glyph compatibility)
-        value = self.font_large.render(f"{total_saved_kg:.2f} kg CO2e", True, (255, 255, 255))
-        screen.blit(value, (x + 15, y + 40))
+        # Big number — only re-render when text changes
+        value_text = f"{total_saved_kg:.2f} kg CO2e"
+        if value_text != self._cached_value_text:
+            self._cached_value_text = value_text
+            self._cached_value_surf = self.font_large.render(value_text, True, (255, 255, 255))
+        screen.blit(self._cached_value_surf, (x + 15, y + 40))
 
-        # Last event line
+        # Last event line — only re-render when text changes
         if last_event:
-            event_text = self.font_small.render(f"+ {last_event}", True, (180, 255, 200))
-            screen.blit(event_text, (x + 15, y + 85))
+            event_key = f"+ {last_event}"
+            if event_key != self._cached_event_text:
+                self._cached_event_text = event_key
+                self._cached_event_surf = self.font_small.render(event_key, True, (180, 255, 200))
+            screen.blit(self._cached_event_surf, (x + 15, y + 85))
 
 
 class OrbitParticle:
@@ -116,10 +137,13 @@ class SpiritCompanion(pygame.sprite.Sprite):
     # Class-level cache for wing surfaces (shared across instances if needed)
     _wing_cache_global = {}
     _star_points_cache = {}  # left in place, but star drawing removed below
+    # Rotation cache: (w, h, color_q, alpha, angle_q) -> rotated Surface
+    _rotated_cache = {}
+    _ROTATED_CACHE_MAX = 256
 
     def __init__(self, shared_state, state_lock):
         super().__init__()
-        self.image = pygame.Surface((600, 600), pygame.SRCALPHA)
+        self.image = pygame.Surface((400, 400), pygame.SRCALPHA)
         self.rect = self.image.get_rect(center=(SCREEN_WIDTH // 4, SCREEN_HEIGHT // 2))
 
         self.shared_state = shared_state
@@ -213,7 +237,7 @@ class SpiritCompanion(pygame.sprite.Sprite):
         return points
 
     def draw_ethereal_wing(self, surf, center, angle_offset, width, height, color, is_left=True):
-        """Optimized wing drawing with caching."""
+        """Wing drawing with rotation caching — quantize angle and color to maximize cache hits."""
         cache_key = (width, height, is_left)
 
         if cache_key not in SpiritCompanion._wing_cache_global:
@@ -230,13 +254,24 @@ class SpiritCompanion(pygame.sprite.Sprite):
         if not is_left:
             rot_angle = -rot_angle
 
+        # Quantize angle to nearest 3 degrees and color to nearest 16 for cache hits
+        rot_q = round(rot_angle / 3.0) * 3.0
+        color_q = (color[0] >> 4, color[1] >> 4, color[2] >> 4)
+
         for wing_surf, w, h, alpha in wing_layers:
-            wing_surf.fill((0, 0, 0, 0))
-            pygame.draw.ellipse(wing_surf, (*color, alpha), (0, 0, w, h))
-            rotated = pygame.transform.rotate(wing_surf, rot_angle)
+            rc_key = (w, h, color_q, alpha, rot_q)
+            rotated = SpiritCompanion._rotated_cache.get(rc_key)
+            if rotated is None:
+                wing_surf.fill((0, 0, 0, 0))
+                pygame.draw.ellipse(wing_surf, (*color, alpha), (0, 0, w, h))
+                rotated = pygame.transform.rotate(wing_surf, rot_q)
+                SpiritCompanion._rotated_cache[rc_key] = rotated
+                if len(SpiritCompanion._rotated_cache) > SpiritCompanion._ROTATED_CACHE_MAX:
+                    for k in list(SpiritCompanion._rotated_cache.keys())[:64]:
+                        del SpiritCompanion._rotated_cache[k]
             surf.blit(rotated, rotated.get_rect(center=center), special_flags=pygame.BLEND_ADD)
 
-    def update(self):
+    def update(self, state_snapshot=None):
         self.image.fill((0, 0, 0, 0))
         now = pygame.time.get_ticks() * 0.001
         epoch_now = time.time()
@@ -245,11 +280,17 @@ class SpiritCompanion(pygame.sprite.Sprite):
         # Desired order:
         #   calm (default) -> angry (when waste detected) -> pristine (only on quest complete)
         #   pristine ALWAYS returns to calm (never directly to angry)
-        with self.state_lock:
-            carbon_saved_event_time = float(self.shared_state.get("last_savings_event_time", 0.0))
-            carbon_saved_event_text = str(self.shared_state.get("last_savings_event", ""))
-            energy_waste_count = int(self.shared_state.get("energy_waste_count", 0))
-            detections = self.shared_state.get("detected_objects", [])
+        if state_snapshot is not None:
+            carbon_saved_event_time = float(state_snapshot.get("last_savings_event_time", 0.0))
+            carbon_saved_event_text = str(state_snapshot.get("last_savings_event", ""))
+            energy_waste_count = int(state_snapshot.get("energy_waste_count", 0))
+            detections = state_snapshot.get("detected_objects", [])
+        else:
+            with self.state_lock:
+                carbon_saved_event_time = float(self.shared_state.get("last_savings_event_time", 0.0))
+                carbon_saved_event_text = str(self.shared_state.get("last_savings_event", ""))
+                energy_waste_count = int(self.shared_state.get("energy_waste_count", 0))
+                detections = self.shared_state.get("detected_objects", [])
 
         # Waste detected signal (future-proof):
         waste_present = energy_waste_count > 0 or any(d.get("carbon_impact") == "high" for d in detections)
@@ -449,9 +490,9 @@ class SpiritCompanion(pygame.sprite.Sprite):
 
 
 class DetectionOverlay:
-    """Optimized detection overlay."""
+    """Optimized detection overlay with pre-allocated surfaces and font caching."""
     __slots__ = ('font', 'small_font', 'impact_colors', 'shared_state', 'state_lock', 'title_surface',
-                 'x0', 'y0')
+                 'x0', 'y0', '_panel', '_panel_h', '_text_cache')
 
     def __init__(self, shared_state, state_lock):
         self.font = pygame.font.Font(None, 28)
@@ -466,21 +507,42 @@ class DetectionOverlay:
         self.state_lock = state_lock
         self.title_surface = self.font.render("Detected Objects", True, (255, 255, 255))
 
-        # Keep down from the top; carbon widget is top-right now, so left panel can be higher
         self.x0 = 20
         self.y0 = 70
 
-    def draw(self, screen):
-        with self.state_lock:
-            detections = self.shared_state["detected_objects"]
+        # Pre-allocate panel at max size (8 detections); re-used every frame
+        max_panel_h = 8 * 30 + 50
+        self._panel = pygame.Surface((320, max_panel_h), pygame.SRCALPHA)
+        self._panel_h = max_panel_h
+        # LRU text cache: text_key -> rendered surface
+        self._text_cache = {}
+
+    def _get_text(self, text, color):
+        key = (text, color)
+        surf = self._text_cache.get(key)
+        if surf is None:
+            surf = self.small_font.render(text, True, color)
+            self._text_cache[key] = surf
+            if len(self._text_cache) > 128:
+                for k in list(self._text_cache.keys())[:32]:
+                    del self._text_cache[k]
+        return surf
+
+    def draw(self, screen, state_snapshot=None):
+        if state_snapshot is not None:
+            detections = state_snapshot.get("detected_objects", [])
+        else:
+            with self.state_lock:
+                detections = self.shared_state["detected_objects"]
 
         if not detections:
             return
 
         panel_h = min(len(detections), 8) * 30 + 50
-        panel_surface = pygame.Surface((320, panel_h), pygame.SRCALPHA)
-        panel_surface.fill((0, 0, 0, 140))
-        screen.blit(panel_surface, (self.x0, self.y0))
+        # Re-use pre-allocated panel, only blit the portion we need
+        self._panel.fill((0, 0, 0, 0))
+        pygame.draw.rect(self._panel, (0, 0, 0, 140), (0, 0, 320, panel_h))
+        screen.blit(self._panel, (self.x0, self.y0), area=(0, 0, 320, panel_h))
         screen.blit(self.title_surface, (self.x0 + 10, self.y0 + 8))
 
         y = self.y0 + 38
@@ -492,22 +554,19 @@ class DetectionOverlay:
 
             label = det.get("label", "?")
             conf = float(det.get("confidence", 0.0))
-            text_surf = self.small_font.render(f"{label} ({conf:.0%})", True, white)
-            screen.blit(text_surf, (self.x0 + 32, y + 2))
-
-            impact_surf = self.small_font.render(det.get("carbon_impact", "?"), True, color)
-            screen.blit(impact_surf, (self.x0 + 240, y + 2))
+            screen.blit(self._get_text(f"{label} ({conf:.0%})", white), (self.x0 + 32, y + 2))
+            screen.blit(self._get_text(det.get("carbon_impact", "?"), color), (self.x0 + 240, y + 2))
             y += 30
 
         if len(detections) > 8:
-            more = self.small_font.render(f"+{len(detections) - 8} more...", True, (150, 150, 150))
-            screen.blit(more, (self.x0 + 32, y + 2))
+            screen.blit(self._get_text(f"+{len(detections) - 8} more...", (150, 150, 150)), (self.x0 + 32, y + 2))
 
 
 class HealthBar:
-    """Optimized HP bar."""
+    """Optimized HP bar with cached font rendering."""
     __slots__ = ('shared_state', 'state_lock', 'width', 'height', 'font',
-                 'fill_color', 'text_color', 'bg_panel', 'x', 'y')
+                 'fill_color', 'text_color', 'bg_panel', 'x', 'y',
+                 '_cached_hp', '_cached_hp_surf')
 
     def __init__(self, shared_state, state_lock):
         self.shared_state = shared_state
@@ -524,22 +583,31 @@ class HealthBar:
         self.x = SCREEN_WIDTH - self.width - 10
         self.y = SCREEN_HEIGHT - self.height - 10
 
-    def draw(self, screen):
-        with self.state_lock:
-            hp = self.shared_state.get("health", 0)
+        self._cached_hp = -1
+        self._cached_hp_surf = None
+
+    def draw(self, screen, state_snapshot=None):
+        if state_snapshot is not None:
+            hp = state_snapshot.get("health", 0)
+        else:
+            with self.state_lock:
+                hp = self.shared_state.get("health", 0)
 
         screen.blit(self.bg_panel, (self.x, self.y))
 
         fill_width = max(0.0, min(hp, 100.0)) * 0.01 * self.width
         pygame.draw.rect(screen, self.fill_color, (self.x, self.y, fill_width, self.height))
 
-        hp_text = self.font.render(f"HP {int(hp)}%", True, self.text_color)
-        screen.blit(hp_text, (self.x + 5, self.y + 2))
+        hp_int = int(hp)
+        if hp_int != self._cached_hp:
+            self._cached_hp = hp_int
+            self._cached_hp_surf = self.font.render(f"HP {hp_int}%", True, self.text_color)
+        screen.blit(self._cached_hp_surf, (self.x + 5, self.y + 2))
 
 
 class MissionTracker:
     """
-    Displays daily carbon mission progress.
+    Displays daily carbon mission progress with pre-allocated surfaces.
     Example: Daily Mission: 2/5 Completed
     """
     def __init__(self, shared_state, state_lock):
@@ -551,22 +619,35 @@ class MissionTracker:
         self.bg_color = (255, 255, 255, 25)
         self.text_color = (255, 255, 255)
 
-    def draw(self, screen):
-        with self.state_lock:
-            completed = int(self.shared_state.get("missions_completed", 0))
-            total = int(self.shared_state.get("missions_total", 5))
+        # Pre-allocate panel at generous max size
+        self._panel = pygame.Surface((300, 40), pygame.SRCALPHA)
+        # Font render cache
+        self._cached_text = ""
+        self._cached_text_surf = None
+        self._cached_width = 0
+        self._cached_height = 0
+
+    def draw(self, screen, state_snapshot=None):
+        if state_snapshot is not None:
+            completed = int(state_snapshot.get("missions_completed", 0))
+            total = int(state_snapshot.get("missions_total", 5))
+        else:
+            with self.state_lock:
+                completed = int(self.shared_state.get("missions_completed", 0))
+                total = int(self.shared_state.get("missions_total", 5))
 
         text = f"Daily Mission: {completed}/{total} Completed"
-        text_surface = self.font.render(text, True, self.text_color)
+        if text != self._cached_text:
+            self._cached_text = text
+            self._cached_text_surf = self.font.render(text, True, self.text_color)
+            self._cached_width = self._cached_text_surf.get_width() + 20
+            self._cached_height = self._cached_text_surf.get_height() + 10
 
-        width = text_surface.get_width() + 20
-        height = text_surface.get_height() + 10
+        x = SCREEN_WIDTH - self._cached_width - self.padding
+        y = SCREEN_HEIGHT - 60
 
-        x = SCREEN_WIDTH - width - self.padding
-        y = SCREEN_HEIGHT - 60  # Slightly above health bar
+        self._panel.fill((0, 0, 0, 0))
+        pygame.draw.rect(self._panel, self.bg_color, (0, 0, self._cached_width, self._cached_height))
+        screen.blit(self._panel, (x, y), area=(0, 0, self._cached_width, self._cached_height))
 
-        panel = pygame.Surface((width, height), pygame.SRCALPHA)
-        panel.fill(self.bg_color)
-        screen.blit(panel, (x, y))
-
-        screen.blit(text_surface, (x + 10, y + 5))
+        screen.blit(self._cached_text_surf, (x + 10, y + 5))

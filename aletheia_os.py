@@ -324,30 +324,35 @@ def main():
                 shared_state["index_finger_tip"] = (mx, my)
                 shared_state["is_pinching"] = pygame.mouse.get_pressed()[0]
 
-        # Update Spirit (Sprite update)
-        spirit_group.update()
+        # --- Single state snapshot for this frame (eliminates 6+ lock acquisitions) ---
+        with state_lock:
+            state_snapshot = dict(shared_state)
+
+        # Update Spirit (pass snapshot to avoid per-widget locking)
+        spirit_group.update(state_snapshot)
 
         # Draw
         screen.fill((0, 0, 0))
 
-        # Camera background (throttled conversion for FPS)
+        # Camera background (throttled conversion with optimized pipeline)
         cam_counter += 1
         if cam_counter % cam_update_every == 0:
             frame = camera.get_frame()
             if frame is not None:
-                # frame is RGB
-                surf = pygame.surfarray.make_surface(np.rot90(frame))
-                cam_surface = pygame.transform.scale(surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
+                # Resize with OpenCV first (SIMD-optimized, much faster than pygame.transform.scale)
+                # then rot90 for pygame's (W, H, C) axis order — rot90 is a free view, no copy
+                resized = cv2.resize(frame, (SCREEN_WIDTH, SCREEN_HEIGHT), interpolation=cv2.INTER_NEAREST)
+                cam_surface = pygame.surfarray.make_surface(np.rot90(resized))
 
         if SHOW_CAMERA_BG and cam_surface is not None:
             screen.blit(cam_surface, (0, 0))
 
-
-        overlay.draw(screen)
+        # Pass state_snapshot to all widgets — zero lock acquisitions in draw calls
+        overlay.draw(screen, state_snapshot)
         spirit_group.draw(screen)
-        health_bar.draw(screen)
-        mission_tracker.draw(screen)
-        carbon_widget.draw(screen)
+        health_bar.draw(screen, state_snapshot)
+        mission_tracker.draw(screen, state_snapshot)
+        carbon_widget.draw(screen, state_snapshot)
 
         pygame.display.flip()
 
