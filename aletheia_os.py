@@ -27,6 +27,7 @@ def resolve_model_path(filename: str) -> str:
         os.path.join(base, "models", filename),
         os.path.join(base, "meta-yolo", filename),
         os.path.join(base, "meta_yolo", filename),
+        os.path.join(base, "blazepalm_executorch", filename),
     ]
     for p in candidates:
         if os.path.exists(p):
@@ -57,8 +58,11 @@ from yolo_worker import yolo_worker_fn
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
 FPS = int(os.getenv("ALETHEIA_FPS", "30"))
 
-# BlazePalm / hand detector model (.pte)
+# BlazePalm / hand detector models (.pte)
 BLAZEPALM_MODEL_PATH = resolve_model_path("blazepalm_xnnpack.pte")
+BLAZEHAND_MODEL_PATH = resolve_model_path("blazehand_xnnpack.pte")
+BLAZEPALM_ANCHORS_PATH = resolve_model_path("anchors_palm.npy")
+HAND_TARGET_HZ = float(os.getenv("ALETHEIA_HAND_HZ", "15"))
 
 # YOLO Object Detection model path
 YOLO_MODEL_PATH = resolve_model_path("yolo26n_xnnpack.pte")
@@ -95,114 +99,6 @@ shared_state = {
 }
 
 state_lock = threading.Lock()
-
-
-# --- HandTrackingThread (ExecuTorch BlazePalm detector, optional) ---
-class HandTrackingThread(threading.Thread):
-    """
-    Optional ExecuTorch hand box detector (.pte).
-    Provides:
-      - shared_state["index_finger_tip"]: cursor point in screen coords
-      - shared_state["is_pinching"]: currently always False
-    """
-    def __init__(self, model_path, camera, shared_state, state_lock,
-                 input_size=256, confidence=0.6, target_hz=18, smoothing=0.35):
-        super().__init__(daemon=True)
-        self.model_path = model_path
-        self.camera = camera
-        self.shared_state = shared_state
-        self.state_lock = state_lock
-        self.input_size = int(input_size)
-        self.confidence = float(confidence)
-        self.target_hz = float(target_hz)
-        self.smoothing = float(smoothing)
-        self.detector = None
-        self._cursor_f = None
-
-    def run(self):
-        print("[HandTrackingThread] Starting (ExecuTorch BlazePalm)...")
-
-        if not os.path.exists(self.model_path):
-            print(f"[HandTrackingThread] WARNING: BlazePalm .pte not found at {self.model_path}")
-            print("[HandTrackingThread] Hand tracking disabled — YOLO + GUI will continue.")
-            return
-
-        try:
-            from blazepalm_engine import BlazePalmDetector  # lazy import
-            self.detector = BlazePalmDetector(
-                self.model_path,
-                input_size=self.input_size,
-                confidence_threshold=self.confidence,
-            )
-        except Exception as e:
-            print(f"[HandTrackingThread] WARNING: could not load BlazePalm model: {e}")
-            print("[HandTrackingThread] Hand tracking disabled — YOLO + GUI will continue.")
-            return
-
-        print("[HandTrackingThread] Waiting for camera frames...")
-        period = 1.0 / max(self.target_hz, 0.1)
-        next_t = time.time()
-
-        while True:
-            with self.state_lock:
-                if self.shared_state["app_quit"]:
-                    break
-
-            now = time.time()
-            if now < next_t:
-                time.sleep(min(0.002, next_t - now))
-                continue
-
-            next_t += period
-            if now - next_t > 0.5:
-                next_t = now + period
-
-            frame_rgb = self.camera.get_frame()
-            if frame_rgb is None:
-                continue
-
-            frame_rgb = cv2.flip(frame_rgb, 1)
-
-            try:
-                dets = self.detector.detect(frame_rgb)
-            except Exception as e:
-                print(f"[HandTrackingThread] ERROR during detect: {e}")
-                dets = []
-
-            cursor = None
-            pinch = False  # placeholder until landmarks exist
-
-            if dets:
-                best = dets[0]
-                h, w = frame_rgb.shape[:2]
-                cx, cy = best["center"]
-
-                x1, y1, x2, y2 = best["box"]
-                cy = int(y1 + (y2 - y1) * 0.25)
-
-                sx = float(cx) * SCREEN_WIDTH / max(w, 1)
-                sy = float(cy) * SCREEN_HEIGHT / max(h, 1)
-                cursor = (sx, sy)
-
-            if cursor is None:
-                cursor = self._cursor_f if self._cursor_f is not None else (0.0, 0.0)
-
-            if self._cursor_f is None:
-                self._cursor_f = cursor
-            else:
-                a = self.smoothing
-                self._cursor_f = (
-                    self._cursor_f[0] * a + cursor[0] * (1.0 - a),
-                    self._cursor_f[1] * a + cursor[1] * (1.0 - a),
-                )
-
-            cursor_int = (int(self._cursor_f[0]), int(self._cursor_f[1]))
-
-            with self.state_lock:
-                self.shared_state["index_finger_tip"] = cursor_int
-                self.shared_state["is_pinching"] = pinch
-
-        print("[HandTrackingThread] Stopped.")
 
 
 def main():
@@ -285,16 +181,37 @@ def main():
     # Numpy view into shared memory for zero-copy frame writes
     _shm_array = np.ndarray(FRAME_SHAPE, dtype=FRAME_DTYPE, buffer=shm.buf[:FRAME_NBYTES])
 
-    # Start Hand thread (optional)
+    # Start Hand tracking worker process (optional)
+    hand_proc = None
+    hand_result_queue = None
+    hand_stop_event = None
     if ENABLE_HANDS:
-        hand_thread = HandTrackingThread(
-            model_path=BLAZEPALM_MODEL_PATH,
-            camera=camera,
-            shared_state=shared_state,
-            state_lock=state_lock,
-            target_hz=18
+        from hand_worker import hand_worker_fn
+
+        hand_result_queue = MPQueue(maxsize=2)
+        hand_stop_event = MPEvent()
+
+        hand_proc = Process(
+            target=hand_worker_fn,
+            args=(
+                BLAZEPALM_MODEL_PATH,
+                BLAZEHAND_MODEL_PATH,
+                BLAZEPALM_ANCHORS_PATH,
+                shm.name,
+                FRAME_SHAPE,
+                np.dtype(FRAME_DTYPE).name,
+                frame_seq,
+                hand_result_queue,
+                hand_stop_event,
+                SCREEN_WIDTH,
+                SCREEN_HEIGHT,
+            ),
+            kwargs={"target_hz": HAND_TARGET_HZ},
+            daemon=True,
         )
-        hand_thread.start()
+        hand_proc.start()
+        print(f"[Main] Hand worker process started (PID={hand_proc.pid}, "
+              f"target_hz={HAND_TARGET_HZ})")
     else:
         print("[Main] Hand tracking disabled (ALETHEIA_ENABLE_HANDS=0). Running YOLO+GUI only.")
 
@@ -365,6 +282,20 @@ def main():
                     shared_state["detected_objects"] = result
         except Exception:
             pass  # queue.Empty is expected
+
+        # Drain hand tracking results from worker process (non-blocking)
+        if ENABLE_HANDS and hand_result_queue is not None:
+            try:
+                while True:
+                    hand_result = hand_result_queue.get_nowait()
+                    if isinstance(hand_result, dict) and "error" in hand_result:
+                        print(f"[Main] Hand worker error: {hand_result['error']}")
+                        break
+                    with state_lock:
+                        shared_state["index_finger_tip"] = hand_result["index_finger_tip"]
+                        shared_state["is_pinching"] = hand_result["is_pinching"]
+            except Exception:
+                pass  # queue.Empty is expected
 
         # --- Single state snapshot for this frame ---
         with state_lock:
@@ -440,6 +371,15 @@ def main():
         print("[Main] YOLO worker did not exit cleanly, terminating...")
         yolo_proc.terminate()
         yolo_proc.join(timeout=1)
+
+    # Stop Hand worker process
+    if hand_proc is not None:
+        hand_stop_event.set()
+        hand_proc.join(timeout=3)
+        if hand_proc.is_alive():
+            print("[Main] Hand worker did not exit cleanly, terminating...")
+            hand_proc.terminate()
+            hand_proc.join(timeout=1)
 
     # Cleanup shared memory
     try:
