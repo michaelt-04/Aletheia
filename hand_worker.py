@@ -1,4 +1,4 @@
-# hand_worker.py - Adaptive Smoothing
+# hand_worker.py - One Euro Filter Smoothing
 # Out-of-process hand tracking worker for Project Aletheia
 
 import os
@@ -17,6 +17,51 @@ MIDDLE_TIP = 12
 RING_TIP = 16
 PINKY_TIP = 20
 
+
+class OneEuroFilter:
+    """1-Euro Filter: low-latency smoothing that adapts to signal speed.
+
+    - When still: heavy smoothing (kills jitter)
+    - When moving fast: light smoothing (kills lag)
+    """
+    def __init__(self, min_cutoff=1.7, beta=0.3, d_cutoff=1.0):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self.x_prev = None
+        self.dx_prev = 0.0
+        self.t_prev = None
+
+    def _alpha(self, cutoff, dt):
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / max(dt, 1e-6))
+
+    def __call__(self, x, t):
+        if self.t_prev is None:
+            self.x_prev = x
+            self.t_prev = t
+            return x
+
+        dt = max(t - self.t_prev, 1e-6)
+        self.t_prev = t
+
+        # Smooth the derivative to avoid noise spikes
+        a_d = self._alpha(self.d_cutoff, dt)
+        dx = (x - self.x_prev) / dt
+        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
+        self.dx_prev = dx_hat
+
+        # Adaptive cutoff: faster movement → higher cutoff → less smoothing
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+
+        # Apply low-pass filter
+        a = self._alpha(cutoff, dt)
+        x_hat = a * x + (1.0 - a) * self.x_prev
+        self.x_prev = x_hat
+
+        return x_hat
+
+
 def hand_worker_fn(
     palm_model_path,
     hand_model_path,
@@ -30,11 +75,13 @@ def hand_worker_fn(
     screen_width,
     screen_height,
     target_hz=30.0,
-    smoothing=0.0, # Ignored, we use adaptive now
+    detect_width=320,
+    detect_height=180,
 ):
     # Mirror flip: enable for selfie webcam testing, disable for Pi forward-facing camera
     mirror = os.getenv("ALETHEIA_MIRROR", "0") == "1"
-    print(f"[HandWorker] Starting (mirror={'on' if mirror else 'off'})...")
+    print(f"[HandWorker] Starting (mirror={'on' if mirror else 'off'}, "
+          f"detect={detect_width}x{detect_height}, target_hz={target_hz})...")
 
     import torch
     torch.set_num_threads(2)
@@ -57,13 +104,23 @@ def hand_worker_fn(
     next_t = time.time()
     got_first = False
 
-    # Smoothing State
-    smooth_x, smooth_y = 0.0, 0.0
+    # One Euro Filters for cursor (smooth when still, responsive when moving)
+    filter_x = OneEuroFilter(min_cutoff=1.7, beta=0.3, d_cutoff=1.0)
+    filter_y = OneEuroFilter(min_cutoff=1.7, beta=0.3, d_cutoff=1.0)
+    cursor_x, cursor_y = 0.0, 0.0
 
-    # Fist detection: avg fingertip-to-wrist distance (in detect_frame pixels)
+    # Fist detection: ratio-based (resolution & hand-size independent)
+    # Ratio = avg_fingertip_to_wrist / wrist_to_middle_mcp
+    #   Open hand: ratio ~2.0-3.0 (fingertips extend well past palm base)
+    #   Fist:      ratio ~0.5-1.0 (fingertips curl back toward wrist)
     is_fist = False
-    FIST_CLOSE_DIST = 45   # below this → fist closed (clicking)
-    FIST_OPEN_DIST = 65    # above this → hand open (not clicking)
+    FIST_CLOSE_RATIO = 1.3   # below this → fist closed
+    FIST_OPEN_RATIO = 1.8    # above this → hand open
+
+    # Debounce: require N consecutive frames to confirm state change
+    fist_close_count = 0
+    fist_open_count = 0
+    FIST_DEBOUNCE = 3
 
     grace_frames = 0
     MAX_GRACE = 4
@@ -71,10 +128,9 @@ def hand_worker_fn(
     # Palm caching: skip expensive palm detection most of the time
     cached_palm = None
     last_palm_time = 0.0
-    PALM_REDETECT_SECS = 3.0  # Full palm re-detection interval
+    PALM_REDETECT_SECS = 1.5  # Shorter cache to avoid stale crops during movement
 
-    # Downsampled detection size (model uses 256x256 internally anyway)
-    DETECT_W, DETECT_H = 320, 180
+    DETECT_W, DETECT_H = detect_width, detect_height
 
     # Timing diagnostics
     detect_count = 0
@@ -101,7 +157,7 @@ def hand_worker_fn(
             got_first = True
 
         # Downsample for faster preprocessing (model resizes to 256x256 internally)
-        detect_frame = cv2.resize(frame, (DETECT_W, DETECT_H), interpolation=cv2.INTER_NEAREST)
+        detect_frame = cv2.resize(frame, (DETECT_W, DETECT_H), interpolation=cv2.INTER_LINEAR)
         if mirror:
             detect_frame = cv2.flip(detect_frame, 1)
 
@@ -119,7 +175,7 @@ def hand_worker_fn(
         t_elapsed = time.perf_counter() - t_start
 
         detect_count += 1
-        if detect_count <= 3 or detect_count % 20 == 0:
+        if detect_count <= 3 or detect_count % 30 == 0:
             mode = "landmarks" if use_cache else "full"
             print(f"[HandWorker] detect ({mode}): {t_elapsed*1000:.0f}ms")
 
@@ -134,38 +190,63 @@ def hand_worker_fn(
             lm = result["landmarks_px"]
 
             # 1. Cursor = palm center (stable regardless of finger position)
-            palm_x = (lm[WRIST][0] + lm[MIDDLE_MCP][0]) / 2.0
-            palm_y = (lm[WRIST][1] + lm[MIDDLE_MCP][1]) / 2.0
-
-            # 2. Fist detection: average fingertip-to-wrist distance
             wrist = lm[WRIST]
+            palm_x = (wrist[0] + lm[MIDDLE_MCP][0]) / 2.0
+            palm_y = (wrist[1] + lm[MIDDLE_MCP][1]) / 2.0
+
+            # Hand base distance (wrist → middle MCP) — stable reference
+            hand_base = math.hypot(
+                lm[MIDDLE_MCP][0] - wrist[0],
+                lm[MIDDLE_MCP][1] - wrist[1],
+            )
+
+            # Sanity check: if hand_base is tiny, landmarks are garbage
+            if hand_base < 5.0:
+                cached_palm = None
+                continue
+
+            # 2. Fist detection: ratio of fingertip distance to hand base
             avg_tip_dist = sum(
                 math.hypot(lm[tip][0] - wrist[0], lm[tip][1] - wrist[1])
                 for tip in (INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP)
             ) / 4.0
 
-            if not is_fist and avg_tip_dist < FIST_CLOSE_DIST:
-                is_fist = True
-                print(f"[HandWorker] FIST closed (avg_dist={avg_tip_dist:.0f}px)")
-            elif is_fist and avg_tip_dist > FIST_OPEN_DIST:
-                is_fist = False
-                print(f"[HandWorker] FIST opened (avg_dist={avg_tip_dist:.0f}px)")
+            fist_ratio = avg_tip_dist / hand_base
+
+            # Log ratio periodically for diagnostics
+            if detect_count % 30 == 0:
+                print(f"[HandWorker] fist_ratio={fist_ratio:.2f} "
+                      f"(tip={avg_tip_dist:.0f}px, base={hand_base:.0f}px, fist={is_fist})")
+
+            # Debounce: require consecutive frames to confirm state change
+            if not is_fist:
+                if fist_ratio < FIST_CLOSE_RATIO:
+                    fist_close_count += 1
+                    if fist_close_count >= FIST_DEBOUNCE:
+                        is_fist = True
+                        fist_close_count = 0
+                        print(f"[HandWorker] FIST closed (ratio={fist_ratio:.2f})")
+                else:
+                    fist_close_count = 0
+            else:
+                if fist_ratio > FIST_OPEN_RATIO:
+                    fist_open_count += 1
+                    if fist_open_count >= FIST_DEBOUNCE:
+                        is_fist = False
+                        fist_open_count = 0
+                        print(f"[HandWorker] FIST opened (ratio={fist_ratio:.2f})")
+                else:
+                    fist_open_count = 0
 
             # 3. Map palm center to screen coordinates
             raw_x = float(palm_x) * screen_width / max(DETECT_W, 1)
             raw_y = float(palm_y) * screen_height / max(DETECT_H, 1)
 
-            # 4. Adaptive Smoothing
-            move_dist = math.hypot(raw_x - smooth_x, raw_y - smooth_y)
-            alpha = 0.15 + (0.7 * min(move_dist / 150.0, 1.0))
+            # 4. One Euro Filter — smooth when still, responsive when moving
+            cursor_x = filter_x(raw_x, now)
+            cursor_y = filter_y(raw_y, now)
 
-            if smooth_x == 0.0:
-                smooth_x, smooth_y = raw_x, raw_y
-            else:
-                smooth_x = smooth_x * (1.0 - alpha) + raw_x * alpha
-                smooth_y = smooth_y * (1.0 - alpha) + raw_y * alpha
-
-            cursor = (int(smooth_x), int(smooth_y))
+            cursor = (int(cursor_x), int(cursor_y))
         else:
             grace_frames += 1
             if grace_frames > MAX_GRACE:
@@ -173,7 +254,7 @@ def hand_worker_fn(
             # Invalidate palm cache if hand lost too long
             if grace_frames > MAX_GRACE * 2:
                 cached_palm = None
-            cursor = (int(smooth_x), int(smooth_y))
+            cursor = (int(cursor_x), int(cursor_y))
 
         # Send (keep key names for GUI compatibility)
         try:

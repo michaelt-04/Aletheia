@@ -64,10 +64,13 @@ BLAZEPALM_MODEL_PATH = resolve_model_path("blazepalm_xnnpack.pte")
 BLAZEHAND_MODEL_PATH = resolve_model_path("blazehand_xnnpack.pte")
 BLAZEPALM_ANCHORS_PATH = resolve_model_path("anchors_palm.npy")
 HAND_TARGET_HZ = float(os.getenv("ALETHEIA_HAND_HZ", "15"))
+HAND_DETECT_W = int(os.getenv("ALETHEIA_HAND_DETECT_W", "480"))
+HAND_DETECT_H = int(os.getenv("ALETHEIA_HAND_DETECT_H", "270"))
 
 # YOLO Object Detection model path
 YOLO_MODEL_PATH = resolve_model_path("yolo26n_xnnpack.pte")
 
+# Camera background: ALETHEIA_SHOW_CAMERA=1 python aletheia_os.py
 SHOW_CAMERA_BG = os.getenv("ALETHEIA_SHOW_CAMERA", "0") == "1"
 
 # --- YOLO Multiprocessing Constants ---
@@ -107,6 +110,8 @@ def main():
     pygame.init()
     print(f"[Main] SDL video driver: {pygame.display.get_driver()}")
     print(f"[Main] FPS target: {FPS} (set ALETHEIA_FPS to change)")
+    print(f"[Main] Camera background: {'ON' if SHOW_CAMERA_BG else 'OFF'} "
+          f"(use ALETHEIA_SHOW_CAMERA=1 to toggle)")
 
     # Fullscreen (no borders), use the display's native resolution
     flags = pygame.FULLSCREEN | pygame.NOFRAME | pygame.HWSURFACE | pygame.DOUBLEBUF
@@ -210,12 +215,13 @@ def main():
                 SCREEN_WIDTH,
                 SCREEN_HEIGHT,
             ),
-            kwargs={"target_hz": HAND_TARGET_HZ},
+            kwargs={"target_hz": HAND_TARGET_HZ,
+                    "detect_width": HAND_DETECT_W, "detect_height": HAND_DETECT_H},
             daemon=True,
         )
         hand_proc.start()
         print(f"[Main] Hand worker process started (PID={hand_proc.pid}, "
-              f"target_hz={HAND_TARGET_HZ})")
+              f"target_hz={HAND_TARGET_HZ}, detect={HAND_DETECT_W}x{HAND_DETECT_H})")
     else:
         print("[Main] Hand tracking disabled (ALETHEIA_ENABLE_HANDS=0). Running YOLO+GUI only.")
 
