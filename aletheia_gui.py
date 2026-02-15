@@ -8,6 +8,7 @@ import array
 from typing import List
 
 # --- Global Configuration ---
+# Default fallback resolution
 SCREEN_WIDTH, SCREEN_HEIGHT = 1280, 720
 BLACK = (0, 0, 0)
 
@@ -30,12 +31,12 @@ def _fast_cos(angle):
 
 
 # =========================
-# Quest Manager & Red Fog
+# Quest Manager
 # =========================
 class QuestManager:
     """
     Manages Quests: Red Fog -> Offer -> Timer -> Completion.
-    Optimized to use pre-rendered sprites for fog to save FPS.
+    Updates Total Carbon and Mission Progress.
     """
     __slots__ = (
         "shared_state", "state_lock",
@@ -44,7 +45,7 @@ class QuestManager:
         "active_target", "quest_state",
         "timer_start", "timer_duration",
         "was_pinching",
-        "xp_table"
+        "carbon_table"
     )
 
     def __init__(self, shared_state, state_lock):
@@ -56,58 +57,50 @@ class QuestManager:
         self.font_timer = pygame.font.Font(None, 48)
 
         # --- OPTIMIZED RED FOG ---
-        # Create one "puff" texture and reuse it (blitting is faster than drawing shapes)
+        # Pre-render a fuzzy red circle
         self.fog_sprite = pygame.Surface((60, 60), pygame.SRCALPHA)
-        # Draw a fuzzy red circle with gradients
         for r in range(30, 0, -5):
             alpha = 5 + (30 - r) * 2
             pygame.draw.circle(self.fog_sprite, (255, 50, 50, alpha), (30, 30), r)
 
-        self.active_target = None  # The detection dict we are targeting
-        self.quest_state = "IDLE"  # IDLE -> OFFER -> ACTIVE -> REWARD
+        self.active_target = None
+        self.quest_state = "IDLE"
         self.timer_start = 0.0
-        self.timer_duration = 30.0 # Seconds to complete quest
+        self.timer_duration = 30.0 # Seconds to complete
         
         self.was_pinching = False
         
-        # XP / Carbon Rewards
-        self.xp_table = {
-            "high": 500.0,    # Grams of carbon (gameified)
+        # Carbon Rewards (g CO2e)
+        self.carbon_table = {
+            "high": 500.0,
             "medium": 150.0,
             "low": 10.0
         }
 
     def _is_clicked(self, cursor, is_pinching):
-        # Rising edge detection
         clicked = is_pinching and not self.was_pinching
         return clicked
 
     def draw(self, screen, state_snapshot, dt=0.016):
-        # 1. Inputs
         is_pinching = state_snapshot.get("is_pinching", False)
         cursor = state_snapshot.get("index_finger_tip", (0, 0))
         detections = state_snapshot.get("detected_objects", [])
         
         clicked = self._is_clicked(cursor, is_pinching)
-        
         current_time = time.time()
-
-        # 2. State Machine
 
         # --- IDLE: Show Red Fog on High Impact Items ---
         if self.quest_state == "IDLE":
             for det in detections:
                 impact = det.get("carbon_impact", "low")
-                # Only show fog on HIGH impact items (TVs, Laptops, etc.)
                 if impact == "high":
                     box = det.get("box", (0, 0, 0, 0))
                     cx = (box[0] + box[2]) // 2
                     cy = (box[1] + box[3]) // 2
                     
-                    # Draw Fog Visual
                     self._draw_fog(screen, cx, cy, dt)
                     
-                    # Hit Test: Pinching the fog opens the quest
+                    # Hit Test
                     if clicked and math.hypot(cursor[0]-cx, cursor[1]-cy) < 80:
                         self.active_target = det
                         self.quest_state = "OFFER"
@@ -131,12 +124,10 @@ class QuestManager:
             else:
                 self.quest_state = "IDLE"
 
-        # --- ACTIVE: Timer + Verification ---
+        # --- ACTIVE: Timer ---
         elif self.quest_state == "ACTIVE":
             elapsed = current_time - self.timer_start
             remaining = max(0.0, self.timer_duration - elapsed)
-            
-            # Auto-fail if time runs out? Or just stay at 0? Let's stay at 0.
             timer_str = f"{remaining:.1f}s"
             
             res = self._draw_popup(screen,
@@ -144,7 +135,7 @@ class QuestManager:
                                    body="1. Unplug the device.\n2. Confirm below.",
                                    options=["I Did It!", "Cancel"],
                                    cursor=cursor, clicked=clicked,
-                                   highlight_color=(255, 100, 100)) # Red urgent tint
+                                   highlight_color=(255, 100, 100))
             
             if res == "I Did It!":
                 self._complete_quest()
@@ -152,9 +143,8 @@ class QuestManager:
                 self.quest_state = "IDLE"
                 self.active_target = None
 
-        # 3. Draw Cursor (Visual Feedback)
+        # Draw Cursor
         cx, cy = cursor
-        # Glow green if pinching, white if not
         color = (50, 255, 100) if is_pinching else (200, 200, 200)
         pygame.draw.circle(screen, color, (cx, cy), 8 if is_pinching else 5)
         pygame.draw.circle(screen, (0, 0, 0), (cx, cy), 10 if is_pinching else 6, 1)
@@ -162,40 +152,27 @@ class QuestManager:
         self.was_pinching = is_pinching
 
     def _draw_fog(self, screen, x, y, dt):
-        """
-        Draws the pre-rendered 'fog_sprite' multiple times with jitter
-        to create a particle cloud effect without heavy object management.
-        """
-        # We use a pseudo-random offset based on time to make it 'boil'
         t = time.time() * 5.0
-        
-        # Draw 5 puffs around the center
         for i in range(5):
-            # Jitter calculation using simple sin/cos to avoid random() overhead every frame
             offset_x = math.sin(t + i) * 30
             offset_y = math.cos(t * 1.3 + i) * 30
-            
-            # Blit the pre-rendered alpha sprite
             screen.blit(self.fog_sprite, (x + offset_x - 30, y + offset_y - 30))
 
     def _draw_popup(self, screen, title, body, options, cursor, clicked, highlight_color=(100, 200, 255)):
+        # Dynamic Centering
+        sw, sh = screen.get_size()
         w, h = 420, 260
-        x = (SCREEN_WIDTH - w) // 2
-        y = (SCREEN_HEIGHT - h) // 2
+        x = (sw - w) // 2
+        y = (sh - h) // 2
         
-        # Panel Background (Semi-transparent dark)
         s = pygame.Surface((w, h), pygame.SRCALPHA)
         s.fill((20, 25, 30, 235))
-        
-        # Border (changes color based on context)
         pygame.draw.rect(s, highlight_color, (0, 0, w, h), 2, border_radius=10)
         screen.blit(s, (x, y))
         
-        # Title
         t_surf = self.font_title.render(title, True, highlight_color)
         screen.blit(t_surf, (x + 20, y + 20))
         
-        # Body text
         lines = body.split('\n')
         by = y + 65
         for line in lines:
@@ -203,64 +180,60 @@ class QuestManager:
             screen.blit(b_surf, (x + 20, by))
             by += 30
             
-        # Buttons
         btn_w = 180
         btn_h = 50
         bx = x + 20
         by = y + h - 70
         
         result = None
-        
         for opt in options:
             btn_rect = pygame.Rect(bx, by, btn_w, btn_h)
             is_hover = btn_rect.collidepoint(cursor)
             
-            # Button Style
             bg = (60, 80, 100) if not is_hover else (80, 120, 100)
             border = (100, 100, 100) if not is_hover else highlight_color
             
             pygame.draw.rect(screen, bg, btn_rect, border_radius=8)
             pygame.draw.rect(screen, border, btn_rect, 2, border_radius=8)
             
-            # Text
             txt = self.font_body.render(opt, True, (255, 255, 255))
             tr = txt.get_rect(center=btn_rect.center)
             screen.blit(txt, tr)
             
             if is_hover and clicked:
                 result = opt
-            
             bx += btn_w + 20
-            
         return result
 
     def _complete_quest(self):
-        """Updates global carbon savings and triggers Spirit Pristine mode."""
         if not self.active_target: return
         
         impact = self.active_target.get("carbon_impact", "low")
-        saved_amount = self.xp_table.get(impact, 10.0)
+        saved_amount = self.carbon_table.get(impact, 10.0)
         label = self.active_target.get("label", "Device")
         
         with self.state_lock:
-            # 1. Update Total Carbon Saved
+            # 1. Update Carbon
             current_saved = float(self.shared_state.get("carbon_saved_g", 0.0))
             self.shared_state["carbon_saved_g"] = current_saved + saved_amount
             
-            # 2. Trigger "Pristine" Celebration in Spirit
+            # 2. Update Missions
+            current_missions = int(self.shared_state.get("missions_completed", 0))
+            total_missions = int(self.shared_state.get("missions_total", 5))
+            if current_missions < total_missions:
+                self.shared_state["missions_completed"] = current_missions + 1
+            
+            # 3. Trigger Spirit Celebration
             self.shared_state["last_savings_event"] = f"Unplugged {label}"
             self.shared_state["last_savings_event_time"] = time.time()
-            
-            # 3. Clear Waste Counter (to make Spirit happy immediately)
             self.shared_state["energy_waste_count"] = 0
 
-        print(f"[Quest] Completed! Saved {saved_amount}g CO2e")
         self.quest_state = "IDLE"
         self.active_target = None
 
 
 # =========================
-# Standard Widgets (Unchanged/Optimized)
+# Standard Widgets
 # =========================
 
 class CarbonSavingsWidget:
@@ -285,7 +258,7 @@ class CarbonSavingsWidget:
         self.width = 360
         self.height = 120
 
-        self.displayed_value = 0.0  # smooth count-up
+        self.displayed_value = 0.0
         self.panel_alpha = panel_alpha
 
         self._panel = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
@@ -307,8 +280,9 @@ class CarbonSavingsWidget:
         self.displayed_value += (total_saved - self.displayed_value) * 0.08
         total_saved_kg = self.displayed_value / 1000.0
 
-        screen_width, _ = screen.get_size()
-        x = screen_width - self.width - self.padding
+        # Dynamic Positioning
+        sw, sh = screen.get_size()
+        x = sw - self.width - self.padding
         y = self.padding
 
         self._panel.fill((0, 0, 0, self.panel_alpha))
@@ -332,7 +306,6 @@ class CarbonSavingsWidget:
 
 class OrbitParticle:
     __slots__ = ('angle', 'radius', 'ang_speed', 'size', 'life', 'color')
-
     def __init__(self, angle, radius, ang_speed, size, life, color):
         self.angle = angle
         self.radius = radius
@@ -345,10 +318,8 @@ class OrbitParticle:
         self.angle += self.ang_speed * dt60
         self.life -= 0.015 * dt60
 
-
 class Particle:
     __slots__ = ('x', 'y', 'color', 'size', 'life', 'decay', 'vel_x', 'vel_y')
-
     def __init__(self, x, y, color):
         self.x, self.y = float(x), float(y)
         self.color = color
@@ -374,12 +345,22 @@ class SpiritCompanion(pygame.sprite.Sprite):
         super().__init__()
         self._render_surf = pygame.Surface((200, 200), pygame.SRCALPHA)
         self.image = pygame.Surface((400, 400), pygame.SRCALPHA)
-        self.rect = self.image.get_rect(center=(SCREEN_WIDTH // 4, SCREEN_HEIGHT // 2))
-
+        self.rect = self.image.get_rect(center=(320, 240))
+        
         self.shared_state = shared_state
         self.state_lock = state_lock
 
-        self.home_pos = pygame.Vector2(SCREEN_WIDTH // 10, SCREEN_HEIGHT // 2)
+        # --- DYNAMIC HOME POSITION (Fixes Spirit Centering) ---
+        # Try to get actual screen size, fallback to 1280x720
+        try:
+            info = pygame.display.Info()
+            sw, sh = info.current_w, info.current_h
+            if sw < 100: sw, sh = 1280, 720 # Sanity check
+        except:
+            sw, sh = 1280, 720
+            
+        # Place Spirit 15% from left edge, centered vertically
+        self.home_pos = pygame.Vector2(sw * 0.15, sh * 0.5)
         self.pos = self.home_pos.copy()
 
         self.hover_angle = 0.0
@@ -401,8 +382,6 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.post_pristine_calm_seconds = 2.0
         self._post_pristine_cooldown_until = 0.0
         self.current_color = pygame.Vector3(80, 255, 150)
-        self.star_angle = 0.0
-        self.star_pulse_t = 0.0
         self.celebration_phase = "idle"
         self.celebration_progress = 0.0
         self.circle_center = self.home_pos.copy()
@@ -425,20 +404,6 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self._max_particles = int(os.getenv("ALETHEIA_MAX_PARTICLES", "40"))
         self._wings_enabled = os.getenv("ALETHEIA_LITE_MODE", "0") != "1"
 
-    def _get_star_points(self, radius, num_points, inner_ratio, angle_offset=0):
-        key = (radius, num_points, inner_ratio, angle_offset)
-        if key in SpiritCompanion._star_points_cache:
-            return SpiritCompanion._star_points_cache[key]
-        points = []
-        for i in range(num_points * 2):
-            r = radius * (inner_ratio if i % 2 == 1 else 1)
-            angle = math.pi / num_points * i + angle_offset
-            x = r * math.sin(angle)
-            y = r * math.cos(angle)
-            points.append((x, y))
-        SpiritCompanion._star_points_cache[key] = points
-        return points
-
     def draw_ethereal_wing(self, surf, center, angle_offset, width, height, color, is_left=True):
         cache_key = (width, height, is_left)
         if cache_key not in SpiritCompanion._wing_cache_global:
@@ -453,7 +418,6 @@ class SpiritCompanion(pygame.sprite.Sprite):
         rot_angle = angle_offset + (_fast_sin(self.wing_angle) * 15)
         if not is_left:
             rot_angle = -rot_angle
-
         rot_q = round(rot_angle / 3.0) * 3.0
         color_q = (color[0] >> 4, color[1] >> 4, color[2] >> 4)
 
@@ -466,8 +430,7 @@ class SpiritCompanion(pygame.sprite.Sprite):
                 rotated = pygame.transform.rotate(wing_surf, rot_q)
                 SpiritCompanion._rotated_cache[rc_key] = rotated
                 if len(SpiritCompanion._rotated_cache) > SpiritCompanion._ROTATED_CACHE_MAX:
-                    for k in list(SpiritCompanion._rotated_cache.keys())[:64]:
-                        del SpiritCompanion._rotated_cache[k]
+                    for k in list(SpiritCompanion._rotated_cache.keys())[:64]: del SpiritCompanion._rotated_cache[k]
             surf.blit(rotated, rotated.get_rect(center=center), special_flags=pygame.BLEND_ADD)
 
     def update(self, state_snapshot=None, dt=None):
@@ -491,8 +454,7 @@ class SpiritCompanion(pygame.sprite.Sprite):
                 detections = self.shared_state.get("detected_objects", [])
 
         waste_present = energy_waste_count > 0 or any(d.get("carbon_impact") == "high" for d in detections)
-        if waste_present:
-            self._last_waste_seen_epoch = epoch_now
+        if waste_present: self._last_waste_seen_epoch = epoch_now
         waste_effective = (epoch_now - self._last_waste_seen_epoch) <= self.waste_timeout_seconds
 
         quest_complete = False
@@ -502,10 +464,8 @@ class SpiritCompanion(pygame.sprite.Sprite):
             quest_complete = carbon_saved_event_text != self._last_seen_savings_event_text
 
         if quest_complete:
-            if carbon_saved_event_time > 0.0:
-                self._last_seen_savings_event_time = carbon_saved_event_time
-            if carbon_saved_event_text:
-                self._last_seen_savings_event_text = carbon_saved_event_text
+            if carbon_saved_event_time > 0.0: self._last_seen_savings_event_time = carbon_saved_event_time
+            if carbon_saved_event_text: self._last_seen_savings_event_text = carbon_saved_event_text
 
         if self.fsm_state == "calm":
             if waste_effective and epoch_now >= self._post_pristine_cooldown_until:
@@ -554,8 +514,7 @@ class SpiritCompanion(pygame.sprite.Sprite):
         self.hover_angle += 0.08 * dt60
 
         if self.current_state == "angry":
-            target_amp = 22.0
-            self._angry_amp += (target_amp - self._angry_amp) * 0.10 * dt60
+            self._angry_amp += (22.0 - self._angry_amp) * 0.10 * dt60
             self.pos.x = self.home_pos.x + _fast_sin(now * self.angry_jitter_rate_x) * self._angry_amp
             self.pos.y = self.home_pos.y + _fast_cos(now * self.angry_jitter_rate_y) * self._angry_amp
         elif self.current_state == "pristine":
@@ -703,8 +662,7 @@ class DetectionOverlay:
 
 class HealthBar:
     __slots__ = ('shared_state', 'state_lock', 'width', 'height', 'font',
-                 'fill_color', 'text_color', 'bg_panel', 'x', 'y',
-                 '_cached_hp', '_cached_hp_surf')
+                 'fill_color', 'text_color', 'bg_panel', '_cached_hp', '_cached_hp_surf')
 
     def __init__(self, shared_state, state_lock):
         self.shared_state = shared_state
@@ -716,8 +674,6 @@ class HealthBar:
         self.text_color = (255, 255, 255)
         self.bg_panel = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
         self.bg_panel.fill((255, 255, 255, 25))
-        self.x = SCREEN_WIDTH - self.width - 10
-        self.y = SCREEN_HEIGHT - self.height - 10
         self._cached_hp = -1
         self._cached_hp_surf = None
 
@@ -725,15 +681,21 @@ class HealthBar:
         if state_snapshot is not None: hp = state_snapshot.get("health", 0)
         else:
             with self.state_lock: hp = self.shared_state.get("health", 0)
+        
+        # Dynamic Positioning (Bottom Right)
+        sw, sh = screen.get_size()
+        x = sw - self.width - 10
+        y = sh - self.height - 10
 
-        screen.blit(self.bg_panel, (self.x, self.y))
+        screen.blit(self.bg_panel, (x, y))
         fill_width = max(0.0, min(hp, 100.0)) * 0.01 * self.width
-        pygame.draw.rect(screen, self.fill_color, (self.x, self.y, fill_width, self.height))
+        pygame.draw.rect(screen, self.fill_color, (x, y, fill_width, self.height))
+        
         hp_int = int(hp)
         if hp_int != self._cached_hp:
             self._cached_hp = hp_int
             self._cached_hp_surf = self.font.render(f"HP {hp_int}%", True, self.text_color)
-        screen.blit(self._cached_hp_surf, (self.x + 5, self.y + 2))
+        screen.blit(self._cached_hp_surf, (x + 5, y + 2))
 
 
 class MissionTracker:
@@ -766,8 +728,10 @@ class MissionTracker:
             self._cached_width = self._cached_text_surf.get_width() + 20
             self._cached_height = self._cached_text_surf.get_height() + 10
 
-        x = SCREEN_WIDTH - self._cached_width - self.padding
-        y = SCREEN_HEIGHT - 60
+        # Dynamic Positioning (Bottom Right, above HealthBar)
+        sw, sh = screen.get_size()
+        x = sw - self._cached_width - self.padding
+        y = sh - 60 
 
         self._panel.fill((0, 0, 0, 0))
         pygame.draw.rect(self._panel, self.bg_color, (0, 0, self._cached_width, self._cached_height))
