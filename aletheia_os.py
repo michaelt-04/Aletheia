@@ -6,8 +6,12 @@ import pygame
 import threading
 import time
 import os
+import atexit
 import numpy as np
 import cv2
+import multiprocessing
+from multiprocessing.shared_memory import SharedMemory
+from multiprocessing import Process, Queue as MPQueue, Event as MPEvent, Value
 
 # Change E: prefer kmsdrm for direct GPU access when running from a TTY (not desktop).
 # Only set if no display server is active — kmsdrm fails under X11/Wayland.
@@ -45,9 +49,8 @@ from camera_rpi import get_camera_manager
 # GUI Components (repo-accurate: most widgets are draw-only; Spirit is a Sprite)
 from aletheia_gui import SpiritCompanion, DetectionOverlay, HealthBar, MissionTracker, CarbonSavingsWidget
 
-# YOLO Detection Components
-# NOTE: if your yolo_engine.py is in project root, use: from yolo_engine import YOLODetector
-from meta_yolo.yolo_engine import YOLODetector
+# YOLO worker — runs in a separate process to avoid GIL contention
+from yolo_worker import yolo_worker_fn
 
 
 # --- Global Constants (Change H: configurable via env vars) ---
@@ -61,6 +64,13 @@ BLAZEPALM_MODEL_PATH = resolve_model_path("blazepalm_xnnpack.pte")
 YOLO_MODEL_PATH = resolve_model_path("yolo26n_xnnpack.pte")
 
 SHOW_CAMERA_BG = os.getenv("ALETHEIA_SHOW_CAMERA", "0") == "1"
+
+# --- YOLO Multiprocessing Constants ---
+FRAME_SHAPE = (720, 1280, 3)   # H, W, C — must match camera resolution
+FRAME_DTYPE = np.uint8
+FRAME_NBYTES = int(np.prod(FRAME_SHAPE)) * np.dtype(FRAME_DTYPE).itemsize
+YOLO_INPUT_SIZE = int(os.getenv("ALETHEIA_YOLO_INPUT_SIZE", "640"))
+YOLO_TARGET_HZ = float(os.getenv("ALETHEIA_YOLO_HZ", "10"))
 
 # --- Shared State Dictionary (matches aletheia_gui.py expectations) ---
 shared_state = {
@@ -85,67 +95,6 @@ shared_state = {
 }
 
 state_lock = threading.Lock()
-
-
-# --- YOLO Detection Thread (throttled) ---
-class YoloDetectionThread(threading.Thread):
-    def __init__(self, model_path, camera, shared_state, state_lock, target_hz=10):
-        super().__init__(daemon=True)
-        self.model_path = model_path
-        self.camera = camera
-        self.shared_state = shared_state
-        self.state_lock = state_lock
-        self.detector = None
-        self._got_first_frame = False
-        self.target_hz = float(target_hz)
-
-    def run(self):
-        print("[YoloDetectionThread] Starting...")
-        try:
-            self.detector = YOLODetector(self.model_path)
-        except Exception as e:
-            print(f"[YoloDetectionThread] ERROR loading YOLO model: {e}")
-            with self.state_lock:
-                self.shared_state["app_quit"] = True
-            return
-
-        print("[YoloDetectionThread] Waiting for camera frames...")
-        period = 1.0 / max(self.target_hz, 0.1)
-        next_t = time.time()
-
-        while True:
-            with self.state_lock:
-                if self.shared_state["app_quit"]:
-                    break
-
-            now = time.time()
-            if now < next_t:
-                time.sleep(min(0.002, next_t - now))
-                continue
-
-            next_t += period
-            if now - next_t > 0.5:
-                next_t = now + period
-
-            frame = self.camera.get_frame()
-            if frame is None:
-                continue
-
-            if not self._got_first_frame:
-                print("[YoloDetectionThread] First frame received. Starting detection loop.")
-                self._got_first_frame = True
-
-            try:
-                detections = self.detector.detect(frame)
-            except Exception as e:
-                print(f"[YoloDetectionThread] ERROR during detection: {e}")
-                detections = []
-
-            with self.state_lock:
-                # IMPORTANT: GUI reads detected_objects
-                self.shared_state["detected_objects"] = detections
-
-        print("[YoloDetectionThread] Stopped.")
 
 
 # --- HandTrackingThread (ExecuTorch BlazePalm detector, optional) ---
@@ -257,6 +206,7 @@ class HandTrackingThread(threading.Thread):
 
 
 def main():
+    multiprocessing.set_start_method("fork", force=True)
     pygame.init()
     print(f"[Main] SDL video driver: {pygame.display.get_driver()}")
     print(f"[Main] FPS target: {FPS} (set ALETHEIA_FPS to change)")
@@ -288,15 +238,52 @@ def main():
     camera.start()
     print("[Main] Camera started.")
 
-    # Start YOLO detection thread
-    yolo_thread = YoloDetectionThread(
-        model_path=YOLO_MODEL_PATH,
-        camera=camera,
-        shared_state=shared_state,
-        state_lock=state_lock,
-        target_hz=10
+    # --- YOLO detection in a separate process (GIL-free) ---
+    # Clean up stale shared memory from a previous crash, if any
+    try:
+        _stale = SharedMemory(name="aletheia_frame", create=False)
+        _stale.close()
+        _stale.unlink()
+        print("[Main] Cleaned up stale shared memory from previous run.")
+    except FileNotFoundError:
+        pass
+    shm = SharedMemory(name="aletheia_frame", create=True, size=FRAME_NBYTES)
+
+    def _cleanup_shm():
+        try:
+            shm.close()
+            shm.unlink()
+        except Exception:
+            pass
+    atexit.register(_cleanup_shm)
+
+    frame_seq = Value('q', 0)
+    yolo_result_queue = MPQueue(maxsize=2)
+    yolo_stop_event = MPEvent()
+
+    yolo_proc = Process(
+        target=yolo_worker_fn,
+        args=(
+            YOLO_MODEL_PATH,
+            shm.name,
+            FRAME_SHAPE,
+            str(FRAME_DTYPE),
+            frame_seq,
+            yolo_result_queue,
+            yolo_stop_event,
+        ),
+        kwargs={
+            "input_size": YOLO_INPUT_SIZE,
+            "target_hz": YOLO_TARGET_HZ,
+        },
+        daemon=True,
     )
-    yolo_thread.start()
+    yolo_proc.start()
+    print(f"[Main] YOLO worker process started (PID={yolo_proc.pid}, "
+          f"input_size={YOLO_INPUT_SIZE}, target_hz={YOLO_TARGET_HZ})")
+
+    # Numpy view into shared memory for zero-copy frame writes
+    _shm_array = np.ndarray(FRAME_SHAPE, dtype=FRAME_DTYPE, buffer=shm.buf[:FRAME_NBYTES])
 
     # Start Hand thread (optional)
     if ENABLE_HANDS:
@@ -317,6 +304,10 @@ def main():
     cam_surface = None
     cam_update_every = 3  # update camera texture every N GUI frames
     cam_counter = 0
+
+    # Frame feeder: copy camera frame to shared memory for YOLO worker
+    _feed_every = max(1, int(FPS / YOLO_TARGET_HZ))
+    _feed_counter = 0
 
     # --- Instrumentation (Change A) ---
     _perf_enabled = os.getenv("ALETHEIA_PERF_LOG", "1") == "1"
@@ -352,6 +343,28 @@ def main():
             with state_lock:
                 shared_state["index_finger_tip"] = (mx, my)
                 shared_state["is_pinching"] = pygame.mouse.get_pressed()[0]
+
+        # Feed camera frame to YOLO worker via shared memory
+        _feed_counter += 1
+        if _feed_counter >= _feed_every:
+            _feed_counter = 0
+            feed_frame = camera.get_frame()
+            if feed_frame is not None and feed_frame.shape == FRAME_SHAPE:
+                np.copyto(_shm_array, feed_frame)
+                frame_seq.value += 1
+
+        # Drain YOLO detection results from worker process (non-blocking)
+        try:
+            while True:
+                result = yolo_result_queue.get_nowait()
+                if isinstance(result, dict) and "error" in result:
+                    print(f"[Main] YOLO worker error: {result['error']}")
+                    running = False
+                    break
+                with state_lock:
+                    shared_state["detected_objects"] = result
+        except Exception:
+            pass  # queue.Empty is expected
 
         # --- Single state snapshot for this frame ---
         with state_lock:
@@ -419,6 +432,21 @@ def main():
     print("[Main] Shutting down...")
     with state_lock:
         shared_state["app_quit"] = True
+
+    # Stop YOLO worker process
+    yolo_stop_event.set()
+    yolo_proc.join(timeout=3)
+    if yolo_proc.is_alive():
+        print("[Main] YOLO worker did not exit cleanly, terminating...")
+        yolo_proc.terminate()
+        yolo_proc.join(timeout=1)
+
+    # Cleanup shared memory
+    try:
+        shm.close()
+        shm.unlink()
+    except Exception as e:
+        print(f"[Main] SharedMemory cleanup warning: {e}")
 
     if _perf_file:
         _perf_file.close()

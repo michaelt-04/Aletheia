@@ -126,9 +126,9 @@ class YOLODetector:
         top, left = int(pad_h), int(pad_w)
         canvas[top:top + new_h, left:left + new_w] = resized
 
-        # BGR -> RGB, normalize to [0,1], HWC -> CHW, add batch, contiguous
-        rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-        img_float = rgb.astype(np.float32) / 255.0
+        # Normalize to [0,1], HWC -> CHW, add batch, contiguous
+        # Camera feeds RGB; skip cvtColor unless caller passes BGR
+        img_float = canvas.astype(np.float32) / 255.0
         tensor = torch.from_numpy(img_float).permute(2, 0, 1).unsqueeze(0).contiguous()
 
         return tensor, (scale, (pad_w, pad_h))
