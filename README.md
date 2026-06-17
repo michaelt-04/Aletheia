@@ -1,7 +1,6 @@
 Project Aletheia: Standalone AR OS
 
 Aletheia is an experimental standalone Augmented Reality operating system built for the Raspberry Pi 4. Developed for SF Hacks 2026, the project focuses on local high performance spatial computing without reliance on external smartphones or cloud processing.
-The Vision
 
 Aletheia transforms standard AR glasses into a context aware workstation. By combining real time object detection with precise hand tracking, the system identifies environmental energy waste and gamifies carbon reduction through an immersive HUD. Instead of just displaying climate data, it makes the impact feel immediate through a visual embodiment of environmental cost.
 System Architecture
